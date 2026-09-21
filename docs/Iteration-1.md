@@ -90,7 +90,7 @@ flowchart TD
         direction TB
         DB_PG[("PostgreSQL\n(Sales & Orders)")]:::data
         DB_MSSQL[("SQL Server\n(CRM & Complaints)")]:::data
-        DB_Files[("Analytics Store\n(Products & Inventory CSV/Parquet)")]:::data
+        DB_Files[("Analytics Store\n(Products & Inventory CSV)")]:::data
     end
 
     %% Cross-Layer Connections
@@ -181,13 +181,13 @@ Establish the repository skeleton, configuration management, and three local/acc
    - Seed data: ~30 customers with `region_id` mapping, ~60 complaint tickets with severity, categories, and dates.
    - Dedicated read-only database user: `readonly_mssql_user`.
 5. **Analytics / File Store (Product & Inventory Domain):**
-   - Data files: `products.parquet`, `inventory.csv`.
+   - Data files: `products.csv`, `inventory.csv`.
    - Accessible locally via an embedded `DuckDB` engine.
 6. **Connectivity Verification Suite:** Automated scripts validating network connections, table presence, and foreign key relationships across all three sources.
 
 ### How It Works
 * Seed SQL and DDL scripts initialize schemas on the local PostgreSQL and SQL Server instances.
-* Relational linkages exist across systems via shared business dimensions: `regions.region_id` matches `customers.region_id`, and `order_items.product_id` matches `products.parquet`.
+* Relational linkages exist across systems via shared business dimensions: `regions.region_id` matches `customers.region_id`, and `order_items.product_id` matches `products.csv`.
 * Restricted DB users are provisioned with `GRANT SELECT ON ALL TABLES` and `REVOKE ALL PRIVILEGES ON ALL TABLES` for mutations (`INSERT`, `UPDATE`, `DELETE`, `DROP`).
 * Python test scripts execute sample queries using read-only credentials to guarantee valid connection pooling and permission enforcement.
 
@@ -197,7 +197,7 @@ Establish the repository skeleton, configuration management, and three local/acc
 * `data/postgres/seed.sql`: PostgreSQL seed records and read-only user creation script.
 * `data/sqlserver/schema.sql`: SQL Server table DDL.
 * `data/sqlserver/seed.sql`: SQL Server seed records and read-only user creation script.
-* `data/files/products.parquet`: Product master catalog.
+* `data/files/products.csv`: Product master catalog.
 * `data/files/inventory.csv`: Warehouse inventory levels.
 * `tests/test_connectivity.py`: Connectivity and permission verification tests.
 * `requirements.txt`: Python package manifest.
@@ -216,7 +216,7 @@ Establish the repository skeleton, configuration management, and three local/acc
 * `test_postgres_readonly_enforcement()`: Confirms that running `DROP TABLE orders` or `INSERT INTO regions` raises permission denied errors.
 * `test_sqlserver_connection()`: Connects with `readonly_mssql_user`, verifies `SELECT * FROM complaints` returns data.
 * `test_sqlserver_readonly_enforcement()`: Confirms that mutation queries raise permission denied errors.
-* `test_duckdb_file_access()`: Queries `products.parquet` and `inventory.csv` via DuckDB, verifying row counts and column types.
+* `test_duckdb_file_access()`: Queries `products.csv` and `inventory.csv` via DuckDB, verifying row counts and column types.
 
 ### Deliverables
 * Working project repository structure.

@@ -8,14 +8,14 @@ DROP TABLE IF EXISTS orders CASCADE;
 DROP TABLE IF EXISTS sales_reps CASCADE;
 DROP TABLE IF EXISTS regions CASCADE;
 
--- Regions table
+-- 1. Regions table (Internal PK)
 CREATE TABLE regions (
     region_id SERIAL PRIMARY KEY,
     region_name VARCHAR(50) NOT NULL UNIQUE,
     headquarters VARCHAR(100) NOT NULL
 );
 
--- Sales Representatives table
+-- 2. Sales Representatives table (Internal FK -> regions)
 CREATE TABLE sales_reps (
     rep_id SERIAL PRIMARY KEY,
     rep_name VARCHAR(100) NOT NULL,
@@ -23,10 +23,10 @@ CREATE TABLE sales_reps (
     region_id INT NOT NULL REFERENCES regions(region_id)
 );
 
--- Orders table
+-- 3. Orders table (Internal FKs -> sales_reps, regions; Logical link -> CRM customers)
 CREATE TABLE orders (
     order_id SERIAL PRIMARY KEY,
-    customer_id INT NOT NULL,  -- Relational link to CRM (SQL Server)
+    customer_id INT NOT NULL,  -- Logical relationship to SQL Server dbo.customers(customer_id) (no DB foreign key)
     rep_id INT NOT NULL REFERENCES sales_reps(rep_id),
     region_id INT NOT NULL REFERENCES regions(region_id),
     order_date DATE NOT NULL,
@@ -35,11 +35,11 @@ CREATE TABLE orders (
     status VARCHAR(30) NOT NULL CHECK (status IN ('COMPLETED', 'PENDING', 'CANCELLED', 'REFUNDED'))
 );
 
--- Order Items table
+-- 4. Order Items table (Internal FK -> orders; Logical link -> Products file)
 CREATE TABLE order_items (
     item_id SERIAL PRIMARY KEY,
     order_id INT NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE,
-    product_id INT NOT NULL,  -- Relational link to Products (DuckDB / Files)
+    product_id INT NOT NULL,  -- Logical relationship to products.csv(product_id) (no DB foreign key)
     quantity INT NOT NULL CHECK (quantity > 0),
     unit_price NUMERIC(10, 2) NOT NULL,
     subtotal NUMERIC(12, 2) NOT NULL

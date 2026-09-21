@@ -11,7 +11,7 @@ CREATE TABLE dbo.customers (
     customer_id INT PRIMARY KEY,
     customer_name NVARCHAR(100) NOT NULL,
     company_name NVARCHAR(100) NOT NULL,
-    region_id INT NOT NULL,  -- Relational link to PostgreSQL regions
+    region_id INT NOT NULL,  -- Logical relationship to PostgreSQL regions(region_id) (no DB foreign key)
     tier NVARCHAR(20) NOT NULL CHECK (tier IN ('ENTERPRISE', 'GROWTH', 'STANDARD')),
     signup_date DATE NOT NULL,
     account_status NVARCHAR(20) NOT NULL CHECK (account_status IN ('ACTIVE', 'CHURNED', 'SUSPENDED'))
