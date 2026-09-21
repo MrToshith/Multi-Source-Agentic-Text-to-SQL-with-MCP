@@ -1,0 +1,11 @@
+product_id,product_name,category,cost_price,list_price,is_active
+301,Enterprise Cloud Suite,Software,1200.00,2500.00,true
+302,AI Analytics Addon,Software,450.00,1100.00,true
+303,Data Sync Bridge,Infrastructure,800.00,1800.00,true
+304,Security Audit Module,Security,600.00,1400.00,true
+305,CRM Connector Pro,Integration,350.00,850.00,true
+306,High-Throughput Queue,Infrastructure,950.00,2200.00,true
+307,Compliance Tracker,Governance,500.00,1250.00,true
+308,Custom Domain Gateway,Networking,200.00,450.00,true
+309,Real-time Log Aggregator,Monitoring,750.00,1650.00,true
+310,Database Replica Agent,Storage,1100.00,2400.00,true

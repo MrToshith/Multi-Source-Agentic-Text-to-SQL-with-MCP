@@ -1,0 +1,11 @@
+product_id,warehouse_id,warehouse_location,stock_level,reorder_point,safety_stock
+301,WH-01,New Jersey,450,100,50
+302,WH-01,New Jersey,210,80,40
+303,WH-02,California,890,200,100
+304,WH-02,California,140,50,25
+305,WH-03,Frankfurt,320,100,50
+306,WH-03,Frankfurt,550,150,75
+307,WH-04,Singapore,780,250,100
+308,WH-04,Singapore,190,60,30
+309,WH-01,New Jersey,620,150,75
+310,WH-02,California,340,100,50
