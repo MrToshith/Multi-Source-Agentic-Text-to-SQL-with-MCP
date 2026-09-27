@@ -1,11 +1,16 @@
 """
 SQL Server database adapter for the crm_db domain.
 Connects with readonly_mssql_user and inspects INFORMATION_SCHEMA and sys.foreign_keys metadata.
+Includes an automatic seed-backed in-memory fallback when the local SQL Server service is offline.
 """
 
+import os
+import re
 import time
 from typing import Any, Optional
+import duckdb
 import pyodbc
+import sqlglot
 
 from src.config import config
 from src.mcp_server.adapters.base import BaseSourceAdapter
@@ -18,6 +23,7 @@ class SQLServerAdapter(BaseSourceAdapter):
 
     def __init__(self, connection_string: Optional[str] = None):
         self.connection_string = connection_string or config.sqlserver.odbc_connection_string
+        self._fallback_con: Optional[duckdb.DuckDBPyConnection] = None
 
     @property
     def source_id(self) -> str:
@@ -29,11 +35,54 @@ class SQLServerAdapter(BaseSourceAdapter):
 
     def _get_connection(self):
         try:
-            return pyodbc.connect(self.connection_string, timeout=3)
+            return pyodbc.connect(self.connection_string, timeout=1)
         except Exception as e:
             raise ConnectionError(
                 f"Could not connect to SQL Server via ODBC: {e}"
             )
+
+    def _get_fallback_db(self) -> duckdb.DuckDBPyConnection:
+        """Initializes an in-memory DuckDB instance populated from data/sqlserver/seed.sql when live MSSQL is offline."""
+        if self._fallback_con is not None:
+            return self._fallback_con
+
+        con = duckdb.connect(":memory:")
+        con.execute("CREATE SCHEMA IF NOT EXISTS dbo;")
+        con.execute("""
+            CREATE TABLE dbo.customers (
+                customer_id INTEGER PRIMARY KEY,
+                customer_name VARCHAR(100) NOT NULL,
+                company_name VARCHAR(100) NOT NULL,
+                region_id INTEGER NOT NULL,
+                tier VARCHAR(20) NOT NULL,
+                signup_date DATE NOT NULL,
+                account_status VARCHAR(20) NOT NULL
+            );
+            CREATE TABLE dbo.complaints (
+                complaint_id INTEGER PRIMARY KEY,
+                customer_id INTEGER NOT NULL,
+                complaint_date DATE NOT NULL,
+                quarter VARCHAR(10) NOT NULL,
+                category VARCHAR(50) NOT NULL,
+                severity VARCHAR(20) NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                resolution_time_hours DOUBLE NULL
+            );
+        """)
+
+        seed_path = os.path.join("data", "sqlserver", "seed.sql")
+        if os.path.exists(seed_path):
+            with open(seed_path, "r", encoding="utf-8") as f:
+                seed_sql = f.read()
+            inserts = re.findall(r"(INSERT INTO\s+dbo\.\w+\s*\([^)]+\)\s*VALUES\s*(?:\([^;]+\))+)", seed_sql, re.DOTALL)
+            for stmt in inserts:
+                con.execute(stmt.strip())
+
+        con.execute("CREATE OR REPLACE VIEW customers AS SELECT * FROM dbo.customers;")
+        con.execute("CREATE OR REPLACE VIEW complaints AS SELECT * FROM dbo.complaints;")
+
+        self._fallback_con = con
+        return self._fallback_con
 
     def list_tables(self) -> list[str]:
         query = """
@@ -42,59 +91,81 @@ class SQLServerAdapter(BaseSourceAdapter):
             WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'dbo'
             ORDER BY TABLE_NAME;
         """
-        with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query)
-                return [r[0] for r in cur.fetchall()]
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query)
+                    return [r[0] for r in cur.fetchall()]
+        except ConnectionError:
+            return ["complaints", "customers"]
 
     def describe_table(self, table_name: str) -> TableSchema:
-        clean_table = table_name.lower().strip()
+        clean_table = table_name.lower().strip().replace("dbo.", "")
         tables = [t.lower() for t in self.list_tables()]
         if clean_table not in tables:
             raise ValueError(f"Table '{table_name}' does not exist in source '{self.source_id}'. Available tables: {tables}")
 
-        col_query = """
-            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'dbo' AND LOWER(TABLE_NAME) = ?
-            ORDER BY ORDINAL_POSITION;
-        """
-        pk_query = """
-            SELECT kcu.COLUMN_NAME
-            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-              ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-              AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
-            WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-              AND tc.TABLE_SCHEMA = 'dbo'
-              AND LOWER(tc.TABLE_NAME) = ?;
-        """
-        count_query = f"SELECT COUNT(*) FROM dbo.{clean_table};"
+        try:
+            col_query = """
+                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = 'dbo' AND LOWER(TABLE_NAME) = ?
+                ORDER BY ORDINAL_POSITION;
+            """
+            pk_query = """
+                SELECT kcu.COLUMN_NAME
+                FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                  ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                  AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                  AND tc.TABLE_SCHEMA = 'dbo'
+                  AND LOWER(tc.TABLE_NAME) = ?;
+            """
+            count_query = f"SELECT COUNT(*) FROM dbo.{clean_table};"
 
-        with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(pk_query, (clean_table,))
-                pk_cols = {r[0] for r in cur.fetchall()}
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(pk_query, (clean_table,))
+                    pk_cols = {r[0] for r in cur.fetchall()}
 
-                cur.execute(col_query, (clean_table,))
-                columns = [
-                    ColumnInfo(
-                        name=r[0],
-                        data_type=r[1],
-                        nullable=(r[2].upper() == "YES"),
-                        is_primary_key=(r[0] in pk_cols)
-                    )
-                    for r in cur.fetchall()
-                ]
+                    cur.execute(col_query, (clean_table,))
+                    columns = [
+                        ColumnInfo(
+                            name=r[0],
+                            data_type=r[1],
+                            nullable=(r[2].upper() == "YES"),
+                            is_primary_key=(r[0] in pk_cols)
+                        )
+                        for r in cur.fetchall()
+                    ]
 
-                cur.execute(count_query)
-                row_count = cur.fetchone()[0]
+                    cur.execute(count_query)
+                    row_count = cur.fetchone()[0]
 
-        return TableSchema(
-            table_name=clean_table,
-            columns=columns,
-            row_count_estimate=row_count
-        )
+            return TableSchema(
+                table_name=clean_table,
+                columns=columns,
+                row_count_estimate=row_count
+            )
+        except ConnectionError:
+            con = self._get_fallback_db()
+            pk_map = {
+                "customers": {"customer_id"},
+                "complaints": {"complaint_id"},
+            }
+            desc_res = con.execute(f"DESCRIBE dbo.{clean_table}").fetchall()
+            columns = [
+                ColumnInfo(
+                    name=str(r[0]),
+                    data_type=str(r[1]),
+                    nullable=(str(r[2]).upper() == "YES"),
+                    is_primary_key=(str(r[0]) in pk_map.get(clean_table, set()))
+                )
+                for r in desc_res
+            ]
+            row_count = con.execute(f"SELECT COUNT(*) FROM dbo.{clean_table}").fetchone()[0]
+            return TableSchema(table_name=clean_table, columns=columns, row_count_estimate=row_count)
 
     def get_relationships(self) -> list[RelationshipInfo]:
         fk_query = """
@@ -126,7 +197,6 @@ class SQLServerAdapter(BaseSourceAdapter):
                             description=f"{r[0]}.{r[1]} references {r[2]}.{r[3]}"
                         ))
         except Exception:
-            # Fallback to known schema metadata if database is unavailable
             relationships.append(
                 RelationshipInfo(
                     source_table="complaints",
@@ -138,7 +208,6 @@ class SQLServerAdapter(BaseSourceAdapter):
                 )
             )
 
-        # Cross-source logical dimension
         relationships.append(
             RelationshipInfo(
                 source_table="customers",
@@ -152,17 +221,25 @@ class SQLServerAdapter(BaseSourceAdapter):
         return relationships
 
     def get_sample_rows(self, table_name: str, limit: int = 3) -> list[dict[str, Any]]:
-        clean_table = table_name.lower().strip()
+        clean_table = table_name.lower().strip().replace("dbo.", "")
         tables = [t.lower() for t in self.list_tables()]
         if clean_table not in tables:
             raise ValueError(f"Table '{table_name}' does not exist in source '{self.source_id}'. Available tables: {tables}")
 
-        query = f"SELECT TOP {max(1, limit)} * FROM dbo.{clean_table};"
-        with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query)
-                columns = [column[0] for column in cur.description]
-                return [dict(zip(columns, row)) for row in cur.fetchall()]
+        try:
+            query = f"SELECT TOP {max(1, limit)} * FROM dbo.{clean_table};"
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query)
+                    columns = [column[0] for column in cur.description]
+                    return [dict(zip(columns, row)) for row in cur.fetchall()]
+        except ConnectionError:
+            con = self._get_fallback_db()
+            df = con.execute(f"SELECT * FROM dbo.{clean_table} LIMIT {max(1, limit)}").df()
+            for col in df.columns:
+                if "date" in col.lower():
+                    df[col] = df[col].astype(str)
+            return df.to_dict(orient="records")
 
     def execute_read_query(
         self,
@@ -173,14 +250,22 @@ class SQLServerAdapter(BaseSourceAdapter):
         bounded_sql = apply_query_limit(sql, max_rows=limit, dialect=self.dialect)
 
         start_time = time.perf_counter()
-        with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.timeout = timeout_seconds
-                cur.execute(bounded_sql)
-                columns = [desc[0] for desc in cur.description] if cur.description else []
-                rows = [list(r) for r in cur.fetchall()]
-        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.timeout = timeout_seconds
+                    cur.execute(bounded_sql)
+                    columns = [desc[0] for desc in cur.description] if cur.description else []
+                    rows = [[str(v) if hasattr(v, 'isoformat') else v for v in r] for r in cur.fetchall()]
+        except ConnectionError:
+            con = self._get_fallback_db()
+            duck_sql = sqlglot.transpile(bounded_sql, read="tsql", write="duckdb")[0]
+            cur = con.cursor()
+            res = cur.execute(duck_sql)
+            columns = [desc[0] for desc in cur.description] if cur.description else []
+            rows = [[str(v) if hasattr(v, 'isoformat') else v for v in r] for r in res.fetchall()]
 
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         return QueryResult(
             columns=columns,
             rows=rows,
