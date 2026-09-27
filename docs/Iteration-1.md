@@ -517,23 +517,23 @@ Complete the backend vertical slice by implementing cross-source in-memory resul
 
 ## Iteration 1 Completion Checklist
 
-- [ ] **Project Foundation:** Repository skeleton, Pydantic configuration, and environment variables established.
-- [ ] **Data Sources Provisioned:** PostgreSQL, SQL Server, and DuckDB/file stores seeded with realistic relational test data.
-- [ ] **Read-Only Credentials Verified:** Database users restricted to `SELECT` permissions; mutations verified to fail at the database level.
-- [ ] **Custom MCP Server Implemented:** Server built using the official MCP SDK exposing the 6 standardized read-only tools.
-- [ ] **MCP Tools Tested:** `list_data_sources`, `list_tables`, `describe_table`, `get_relationships`, `get_sample_rows`, and `execute_read_query` verified across all backends.
-- [ ] **Server Guardrails Enforced:** Secondary AST check, query timeouts, and max row limits operating independently on the MCP server.
-- [ ] **LangGraph State & Routing Active:** Compiled state graph correctly passing context between nodes.
-- [ ] **Conversational Clarification Functional:** Ambiguous queries trigger clarification interruptions and resume on user input.
-- [ ] **Multi-Source Planning Operational:** Cross-domain questions correctly decomposed into source-specific sub-queries.
-- [ ] **Targeted Schema Discovery Working:** Schema DDL, foreign keys, and sample rows retrieved dynamically through MCP without prompt bloat.
-- [ ] **Dialect-Aware Text-to-SQL Generating:** Native SQL drafted accurately for PostgreSQL, SQL Server, and DuckDB.
-- [ ] **SQL Safety Validation Enforced:** SQLGlot AST parser rejects non-SELECT queries and enforces row bounds.
-- [ ] **Safe MCP Execution Verified:** Validated queries dispatched and executed strictly through the MCP tool boundary.
-- [ ] **Self-Correction Loop Active:** Runtime syntax or column errors autonomously healed and re-validated within 3 retries.
-- [ ] **Cross-Source Aggregation Functional:** In-memory Pandas joins merge multi-database result sets on shared keys.
-- [ ] **FastAPI Endpoints Operational:** `POST /query` and `GET /health` responding accurately with in-memory session persistence.
-- [ ] **Core Test Suite Passing:** `pytest tests/` passing 100% across unit, routing, and end-to-end integration tests.
+- [x] **Project Foundation:** Repository skeleton, Pydantic configuration, and environment variables established.
+- [x] **Data Sources Provisioned:** PostgreSQL, SQL Server, and DuckDB/file stores seeded with realistic relational test data.
+- [x] **Read-Only Credentials Verified:** Database users restricted to `SELECT` permissions; mutations verified to fail at the database level.
+- [x] **Custom MCP Server Implemented:** Server built using the official MCP SDK exposing the 6 standardized read-only tools.
+- [x] **MCP Tools Tested:** `list_data_sources`, `list_tables`, `describe_table`, `get_relationships`, `get_sample_rows`, and `execute_read_query` verified across all backends.
+- [x] **Server Guardrails Enforced:** Secondary AST check, query timeouts, and max row limits operating independently on the MCP server.
+- [x] **LangGraph State & Routing Active:** Compiled state graph correctly passing context between nodes.
+- [x] **Conversational Clarification Functional:** Ambiguous queries trigger clarification interruptions and resume on user input.
+- [x] **Multi-Source Planning Operational:** Cross-domain questions correctly decomposed into source-specific sub-queries.
+- [x] **Targeted Schema Discovery Working:** Schema DDL, foreign keys, and sample rows retrieved dynamically through MCP without prompt bloat.
+- [x] **Dialect-Aware Text-to-SQL Generating:** Native SQL drafted accurately for PostgreSQL, SQL Server, and DuckDB.
+- [x] **SQL Safety Validation Enforced:** SQLGlot AST parser rejects non-SELECT queries and enforces row bounds.
+- [x] **Safe MCP Execution Verified:** Validated queries dispatched and executed strictly through the MCP tool boundary.
+- [x] **Self-Correction Loop Active:** Runtime syntax or column errors autonomously healed and re-validated within 3 retries.
+- [x] **Cross-Source Aggregation Functional:** In-memory Pandas joins merge multi-database result sets on shared keys.
+- [x] **FastAPI Endpoints Operational:** `POST /query` and `GET /health` responding accurately with in-memory session persistence.
+- [x] **Core Test Suite Passing:** `pytest tests/` passing 100% across unit, routing, and end-to-end integration tests.
 
 ---
 

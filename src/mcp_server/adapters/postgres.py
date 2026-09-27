@@ -141,14 +141,10 @@ class PostgresAdapter(BaseSourceAdapter):
                 ORDER BY ordinal_position;
             """
             pk_query = """
-                SELECT kcu.column_name
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                  ON tc.constraint_name = kcu.constraint_name
-                  AND tc.table_schema = kcu.table_schema
-                WHERE tc.constraint_type = 'PRIMARY KEY'
-                  AND tc.table_schema = 'public'
-                  AND tc.table_name = %s;
+                SELECT a.attname
+                FROM pg_index i
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                WHERE i.indrelid = %s::regclass AND i.indisprimary;
             """
             count_query = "SELECT COUNT(*) FROM " + clean_table + ";"
 

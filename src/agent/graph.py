@@ -1,6 +1,7 @@
 """
 LangGraph workflow assembly for Multi-Source Agentic Text-to-SQL.
-Phases 3 & 4: Guard -> Planner -> Context Builder -> Text-to-SQL -> Validator -> Execution / Self-Correction Loop.
+Complete End-to-End Pipeline (Phases 3, 4, 5):
+Guard -> Planner -> Context Builder -> Text-to-SQL -> Validator -> Execution / Self-Correction -> Aggregator -> Explainer.
 """
 
 from typing import Literal
@@ -14,6 +15,8 @@ from src.agent.nodes.text2sql import text2sql_generator_node
 from src.agent.nodes.validator import sql_safety_validator_node
 from src.agent.nodes.execution import mcp_execution_coordinator_node
 from src.agent.nodes.recovery import error_recovery_node, MAX_RETRIES
+from src.agent.nodes.aggregator import cross_source_aggregator_node
+from src.agent.nodes.explainer import result_explainer_node
 
 
 def route_after_guard(state: AgentState) -> Literal["planner", "__end__"]:
@@ -32,13 +35,13 @@ def route_after_validator(state: AgentState) -> Literal["execution", "recovery",
     return "execution"
 
 
-def route_after_execution(state: AgentState) -> Literal["recovery", "__end__"]:
-    """Routes to recovery if runtime execution errors occurred, otherwise completes."""
+def route_after_execution(state: AgentState) -> Literal["aggregator", "recovery", "__end__"]:
+    """Routes to recovery if runtime execution errors occurred, otherwise to cross-source aggregator."""
     if state.get("execution_errors"):
         if state.get("retry_count", 0) >= MAX_RETRIES:
             return "__end__"
         return "recovery"
-    return "__end__"
+    return "aggregator"
 
 
 def route_after_recovery(state: AgentState) -> Literal["validator", "__end__"]:
@@ -49,7 +52,7 @@ def route_after_recovery(state: AgentState) -> Literal["validator", "__end__"]:
 
 
 def build_agent_graph(mcp_client=None):
-    """Compiles and returns the LangGraph StateGraph workflow."""
+    """Compiles and returns the complete LangGraph StateGraph workflow."""
     workflow = StateGraph(AgentState)
 
     workflow.add_node("guard", intent_clarification_guard_node)
@@ -68,6 +71,8 @@ def build_agent_graph(mcp_client=None):
         lambda state: mcp_execution_coordinator_node(state, mcp_client=mcp_client),
     )
     workflow.add_node("recovery", error_recovery_node)
+    workflow.add_node("aggregator", cross_source_aggregator_node)
+    workflow.add_node("explainer", result_explainer_node)
 
     workflow.set_entry_point("guard")
     workflow.add_conditional_edges(
@@ -96,6 +101,7 @@ def build_agent_graph(mcp_client=None):
         "execution",
         route_after_execution,
         {
+            "aggregator": "aggregator",
             "recovery": "recovery",
             "__end__": END,
         },
@@ -109,6 +115,9 @@ def build_agent_graph(mcp_client=None):
             "__end__": END,
         },
     )
+
+    workflow.add_edge("aggregator", "explainer")
+    workflow.add_edge("explainer", END)
 
     return workflow.compile()
 
