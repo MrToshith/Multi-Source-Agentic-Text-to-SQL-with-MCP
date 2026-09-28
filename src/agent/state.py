@@ -23,6 +23,7 @@ class AgentState(TypedDict, total=False):
     # Phase 3: Intent & Clarification Guard + Planning + Schema Discovery
     clarification_needed: bool
     clarification_question: Optional[str]
+    structured_intent: Optional[Dict[str, Any]]
     plan: List[SubQueryTask]
     join_keys: List[str]
     schema_context: Dict[str, Any]
@@ -57,6 +58,7 @@ def create_initial_state(
         user_query=user_query,
         clarification_needed=False,
         clarification_question=None,
+        structured_intent=None,
         plan=[],
         join_keys=[],
         schema_context={},

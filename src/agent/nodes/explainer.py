@@ -1,20 +1,43 @@
 """
 Result Explainer Node.
-Synthesizes natural-language business takeaways and chart visualization specifications from aggregated data.
+Synthesizes natural-language business answers and optional chart configurations strictly from
+the actual database result (aggregated_data) and the Planner's structured_intent.
 """
 
 from typing import Any, Dict, List
 from src.agent.state import AgentState
-from src.agent.llm import default_llm_client
-from src.agent.prompts.explainer import EXPLAINER_SYSTEM_PROMPT, format_explainer_prompt
+from src.agent.intent_resolver import resolve_query_intent
+
+
+ATTRIBUTE_LABELS = {
+    "cost_price": "cost price",
+    "list_price": "list price",
+    "stock_level": "stock level",
+    "warehouse_location": "warehouse location",
+    "reorder_point": "reorder point",
+    "safety_stock": "safety stock",
+    "category": "category",
+}
+
+
+def _format_number_str(val: Any) -> str:
+    """Formats numeric values so both raw integer (1100) and formatted currency ($1,100.00) are clear."""
+    if isinstance(val, (int, float)):
+        fval = float(val)
+        if fval.is_integer():
+            ival = int(fval)
+            return f"{ival} (${fval:,.2f})" if ival >= 100 else str(ival)
+        return f"{fval:.2f} (${fval:,.2f})"
+    return str(val)
 
 
 def result_explainer_node(state: AgentState) -> Dict[str, Any]:
     """
-    Produces a natural-language business answer and optional chart config from aggregated_data.
+    Produces a natural-language business answer and optional chart config strictly from aggregated_data.
     """
     user_query = state.get("user_query") or ""
     aggregated_data: List[Dict[str, Any]] = state.get("aggregated_data") or []
+    structured_intent = state.get("structured_intent") or resolve_query_intent(user_query)
 
     if not aggregated_data:
         return {
@@ -23,20 +46,86 @@ def result_explainer_node(state: AgentState) -> Dict[str, Any]:
             "execution_status": "completed",
         }
 
-    # Try local LLM if enabled
-    llm_result = default_llm_client.generate_json(
-        prompt=format_explainer_prompt(user_query, aggregated_data[:20]),
-        system_prompt=EXPLAINER_SYSTEM_PROMPT,
-    )
-    if llm_result and isinstance(llm_result.get("final_answer"), str) and llm_result["final_answer"].strip():
+    intent_type = structured_intent.get("intent")
+    sample = aggregated_data[0]
+
+    # A) Exact Entity Attribute Lookup (e.g., "What is the cost price of Database Replica Agent?")
+    if intent_type == "entity_attribute_lookup":
+        attr = structured_intent.get("attribute") or "cost_price"
+        attr_label = ATTRIBUTE_LABELS.get(attr, attr.replace("_", " "))
+        entity_name = sample.get("product_name") or structured_intent.get("entity") or "The requested item"
+        val = sample.get(attr)
+
+        if attr in ("cost_price", "list_price") and isinstance(val, (int, float)):
+            fval = float(val)
+            raw_str = str(int(fval)) if fval.is_integer() else f"{fval:.2f}"
+            final_answer = f"{entity_name} has a {attr_label} of {raw_str} (${fval:,.2f})."
+        elif attr == "stock_level" and isinstance(val, (int, float)):
+            final_answer = f"{entity_name} has a {attr_label} of {int(val)} units."
+        else:
+            final_answer = f"{entity_name} has a {attr_label} of {val}."
+
         return {
-            "final_answer": llm_result["final_answer"],
-            "visualization_config": llm_result.get("visualization_config"),
+            "final_answer": final_answer,
+            "visualization_config": None,
             "execution_status": "completed",
         }
 
-    # Deterministic analytical narrative synthesis
-    sample = aggregated_data[0]
+    # C) Aggregation / Ranking (e.g., "Which product has the highest list price?", "What is the average cost price of products?")
+    if intent_type == "aggregation":
+        agg_spec = structured_intent.get("aggregation")
+        order_spec = structured_intent.get("order_by")
+
+        if agg_spec:
+            fn = agg_spec.get("function", "AVG")
+            col = agg_spec.get("column", "cost_price")
+            col_label = ATTRIBUTE_LABELS.get(col, col.replace("_", " "))
+            alias = f"{fn.lower()}_{col}"
+            val = sample.get(alias, next(iter(sample.values()), 0))
+            fn_word = "average" if fn == "AVG" else ("total" if fn == "SUM" else "count of")
+            return {
+                "final_answer": f"The {fn_word} {col_label} is {_format_number_str(val)}.",
+                "visualization_config": None,
+                "execution_status": "completed",
+            }
+
+        if order_spec:
+            col = order_spec.get("column", "list_price")
+            col_label = ATTRIBUTE_LABELS.get(col, col.replace("_", " "))
+            direction = order_spec.get("direction", "DESC")
+            superlative = "highest" if direction == "DESC" else "lowest"
+            entity_name = sample.get("product_name") or sample.get("region_name") or "The top record"
+            val = sample.get(col)
+            if col in ("cost_price", "list_price") and isinstance(val, (int, float)):
+                fval = float(val)
+                raw_str = str(int(fval)) if fval.is_integer() else f"{fval:.2f}"
+                answer_text = f"{entity_name} has the {superlative} {col_label} at {raw_str} (${fval:,.2f})."
+            else:
+                answer_text = f"{entity_name} has the {superlative} {col_label} at {val}."
+            return {
+                "final_answer": answer_text,
+                "visualization_config": None if len(aggregated_data) == 1 else {
+                    "chart_type": "bar",
+                    "title": f"Analysis: {user_query[:60]}",
+                    "x_axis": "product_name",
+                    "y_axes": [col],
+                    "data": aggregated_data[:20],
+                },
+                "execution_status": "completed",
+            }
+
+    # B) Filtering / Listing
+    if intent_type == "filtering":
+        f_cond = structured_intent.get("filter_condition") or {}
+        if f_cond.get("column") == "category":
+            names = ", ".join(str(r.get("product_name")) for r in aggregated_data if r.get("product_name"))
+            return {
+                "final_answer": f"Found {len(aggregated_data)} product(s) in the {f_cond.get('value')} category: {names}.",
+                "visualization_config": None,
+                "execution_status": "completed",
+            }
+
+    # D & E) Grouping and Cross-Source synthesis
     summary_parts: List[str] = []
 
     if "total_revenue" in sample:
@@ -61,11 +150,10 @@ def result_explainer_node(state: AgentState) -> Dict[str, Any]:
         )
 
     if not summary_parts:
-        summary_parts.append(f"Successfully retrieved and synthesized **{len(aggregated_data)} records** across the target data sources.")
+        summary_parts.append(f"Successfully retrieved **{len(aggregated_data)} records**.")
 
     final_answer = " ".join(summary_parts)
 
-    # Build chart specification
     x_axis = "region_name" if "region_name" in sample else ("product_name" if "product_name" in sample else list(sample.keys())[0])
     y_axes = [k for k in ("total_revenue", "complaint_count", "order_count", "stock_level", "list_price") if k in sample]
 
@@ -75,7 +163,7 @@ def result_explainer_node(state: AgentState) -> Dict[str, Any]:
         "x_axis": x_axis,
         "y_axes": y_axes,
         "data": aggregated_data[:20],
-    }
+    } if len(aggregated_data) > 1 and y_axes else None
 
     return {
         "final_answer": final_answer,

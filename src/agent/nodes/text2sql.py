@@ -1,18 +1,25 @@
 """
 Dialect-Aware Text-to-SQL Generator Node.
-Generates native read-only SQL tailored to PostgreSQL, SQL Server (T-SQL), and DuckDB.
+Uses the Planner's structured_intent to generate native read-only SQL tailored to
+PostgreSQL, SQL Server (T-SQL), and DuckDB without reinterpreting exact entity lookups into broad inventory queries.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from src.agent.state import AgentState
-from src.agent.llm import default_llm_client
-from src.agent.prompts.text2sql import TEXT2SQL_SYSTEM_PROMPT, format_text2sql_prompt
+from src.agent.intent_resolver import resolve_query_intent
 
 
-def generate_dialect_sql_for_source(source: str, user_query: str, join_key: str = "region_id") -> str:
-    """Produces dialect-specific SQL for a given target source and user query."""
+def generate_dialect_sql_for_source(
+    source: str,
+    user_query: str,
+    join_key: str = "region_id",
+    structured_intent: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Produces dialect-specific SQL for a given target source and structured intent."""
     q_lower = user_query.lower()
     filter_q4 = "q4" in q_lower or "last quarter" in q_lower
+    intent_obj = structured_intent or resolve_query_intent(user_query)
+    intent_type = intent_obj.get("intent")
 
     if source == "sales_pg":
         # PostgreSQL dialect (uses LIMIT)
@@ -72,17 +79,85 @@ def generate_dialect_sql_for_source(source: str, user_query: str, join_key: str 
         ).replace("  ", " ")
 
     if source == "analytics_duckdb":
-        # DuckDB analytical SQL dialect (uses LIMIT)
-        if "below 300" in q_lower or "low stock" in q_lower or "< 300" in q_lower:
+        # A) Exact Entity Attribute Lookup
+        if intent_type == "entity_attribute_lookup" and intent_obj.get("entity"):
+            entity_val = str(intent_obj["entity"]).replace("'", "''")
+            attr = intent_obj.get("attribute") or "cost_price"
+            table = intent_obj.get("table") or "products"
+
+            if table == "inventory":
+                return (
+                    f"SELECT p.product_name, i.{attr} "
+                    f"FROM inventory i "
+                    f"JOIN products p ON i.product_id = p.product_id "
+                    f"WHERE p.product_name = '{entity_val}' "
+                    f"LIMIT 1"
+                )
             return (
-                "SELECT p.product_id, p.product_name, p.category, p.list_price, "
-                "i.warehouse_location, i.stock_level, i.reorder_point "
-                "FROM products p "
-                "JOIN inventory i ON p.product_id = i.product_id "
-                "WHERE i.stock_level < 300 "
-                "ORDER BY i.stock_level ASC "
-                "LIMIT 50"
+                f"SELECT product_name, {attr} "
+                f"FROM products "
+                f"WHERE product_name = '{entity_val}' "
+                f"LIMIT 1"
             )
+
+        # B) Filtering / Listing
+        if intent_type == "filtering":
+            f_cond = intent_obj.get("filter_condition") or {}
+            col = f_cond.get("column") or "stock_level"
+            op = f_cond.get("operator") or "<"
+            val = f_cond.get("value", 300)
+            table = intent_obj.get("table") or "inventory"
+
+            if table == "products" and col == "category":
+                safe_val = str(val).replace("'", "''")
+                return (
+                    f"SELECT product_id, product_name, category, cost_price, list_price "
+                    f"FROM products "
+                    f"WHERE LOWER(category) = LOWER('{safe_val}') "
+                    f"LIMIT 50"
+                )
+            return (
+                f"SELECT p.product_id, p.product_name, p.category, p.list_price, "
+                f"i.warehouse_location, i.stock_level, i.reorder_point "
+                f"FROM products p "
+                f"JOIN inventory i ON p.product_id = i.product_id "
+                f"WHERE i.{col} {op} {val} "
+                f"ORDER BY i.{col} ASC "
+                f"LIMIT 50"
+            )
+
+        # C) Aggregation / Ranking
+        if intent_type == "aggregation":
+            agg_spec = intent_obj.get("aggregation")
+            order_spec = intent_obj.get("order_by")
+            table = intent_obj.get("table") or "products"
+
+            if agg_spec:
+                fn = agg_spec.get("function", "AVG")
+                col = agg_spec.get("column", "cost_price")
+                alias = f"{fn.lower()}_{col}"
+                return f"SELECT ROUND({fn}({col}), 2) AS {alias} FROM {table}"
+
+            if order_spec:
+                col = order_spec.get("column", "list_price")
+                direction = order_spec.get("direction", "DESC")
+                limit_val = int(order_spec.get("limit", 1))
+                if table == "inventory":
+                    return (
+                        f"SELECT p.product_name, i.{col} "
+                        f"FROM inventory i "
+                        f"JOIN products p ON i.product_id = p.product_id "
+                        f"ORDER BY i.{col} {direction} "
+                        f"LIMIT {limit_val}"
+                    )
+                return (
+                    f"SELECT product_name, {col} "
+                    f"FROM products "
+                    f"ORDER BY {col} {direction} "
+                    f"LIMIT {limit_val}"
+                )
+
+        # Fallback for general cross-source product/inventory joins
         return (
             "SELECT p.product_id, p.product_name, p.category, p.cost_price, p.list_price, "
             "i.warehouse_location, i.stock_level "
@@ -97,7 +172,7 @@ def generate_dialect_sql_for_source(source: str, user_query: str, join_key: str 
 
 def text2sql_generator_node(state: AgentState) -> Dict[str, Any]:
     """
-    Drafts dialect-aware SQL queries for every planned source.
+    Drafts dialect-aware SQL queries for every planned source using the Planner's structured_intent.
     Preserves any pre-supplied generated_sql if already set (e.g. during retry/test injection).
     """
     existing_sql = state.get("generated_sql") or {}
@@ -106,19 +181,9 @@ def text2sql_generator_node(state: AgentState) -> Dict[str, Any]:
 
     user_query = state.get("user_query") or ""
     plan = state.get("plan") or []
-    schema_context = state.get("schema_context") or {}
+    structured_intent = state.get("structured_intent") or resolve_query_intent(user_query)
     join_keys = state.get("join_keys") or ["region_id"]
     primary_join_key = join_keys[0] if join_keys else "region_id"
-
-    llm_result = default_llm_client.generate_json(
-        prompt=format_text2sql_prompt(user_query, plan, schema_context),
-        system_prompt=TEXT2SQL_SYSTEM_PROMPT,
-    )
-    if llm_result and isinstance(llm_result.get("generated_sql"), dict) and len(llm_result["generated_sql"]) > 0:
-        return {
-            "generated_sql": llm_result["generated_sql"],
-            "execution_status": "sql_generated",
-        }
 
     generated_sql: Dict[str, str] = {}
     for task in plan:
@@ -128,9 +193,15 @@ def text2sql_generator_node(state: AgentState) -> Dict[str, Any]:
             if source in existing_sql:
                 generated_sql[source] = existing_sql[source]
             else:
-                generated_sql[source] = generate_dialect_sql_for_source(source, user_query, join_key=task_join_key)
+                generated_sql[source] = generate_dialect_sql_for_source(
+                    source,
+                    user_query,
+                    join_key=task_join_key,
+                    structured_intent=structured_intent,
+                )
 
     return {
+        "structured_intent": structured_intent,
         "generated_sql": generated_sql,
         "execution_status": "sql_generated",
     }

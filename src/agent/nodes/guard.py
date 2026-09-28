@@ -1,12 +1,14 @@
 """
 Intent & Clarification Guard Node.
-Assesses user query completeness and pauses execution with a clarification prompt when ambiguous.
+Assesses user query completeness, detects ambiguous entity references using MCP catalog metadata,
+and pauses execution with a clarification prompt when ambiguous.
 """
 
 from typing import Any, Dict
 from src.agent.state import AgentState
 from src.agent.llm import default_llm_client
 from src.agent.prompts.guard import GUARD_SYSTEM_PROMPT, format_guard_prompt
+from src.agent.intent_resolver import resolve_query_intent
 
 
 AMBIGUOUS_SHORT_PHRASES = {
@@ -32,7 +34,7 @@ AMBIGUOUS_SHORT_PHRASES = {
 def intent_clarification_guard_node(state: AgentState) -> Dict[str, Any]:
     """
     Evaluates whether the user's natural language query is unambiguous or requires clarification.
-    If the session already has prior turns answering a clarification, proceeds directly to planning.
+    Also verifies entity resolution so partial/ambiguous product mentions trigger clarification.
     """
     user_query = (state.get("user_query") or "").strip()
     messages = state.get("messages") or []
@@ -40,38 +42,41 @@ def intent_clarification_guard_node(state: AgentState) -> Dict[str, Any]:
     # Count how many user messages exist in conversation history
     user_turns = [m for m in messages if m.get("role") == "user"]
     if len(user_turns) > 1:
-        # Combine prior query context with clarification response
         combined_query = " | ".join(m.get("content", "") for m in user_turns)
+        resolved = resolve_query_intent(combined_query)
         return {
             "user_query": combined_query,
+            "structured_intent": resolved,
             "clarification_needed": False,
             "clarification_question": None,
             "execution_status": "intent_verified",
         }
 
-    # Try local LLM if enabled
-    llm_result = default_llm_client.generate_json(
-        prompt=format_guard_prompt(user_query, messages),
-        system_prompt=GUARD_SYSTEM_PROMPT,
-    )
-    if llm_result and isinstance(llm_result.get("clarification_needed"), bool):
-        if llm_result["clarification_needed"]:
-            question = llm_result.get("clarification_question") or (
-                "Could you please clarify the specific metric, breakdown dimension (e.g., by region or product), "
-                "or time period (e.g., Q4-2025 or Q1-2026) you want to analyze?"
-            )
-            return {
-                "clarification_needed": True,
-                "clarification_question": question,
-                "execution_status": "clarification_needed",
-            }
+    # Resolve structured intent and entity matches against MCP catalog first
+    resolved_intent = resolve_query_intent(user_query)
+
+    # 1. If user referenced an ambiguous or incomplete product entity (e.g., "What's the price of the database agent?")
+    if resolved_intent.get("ambiguous_entity"):
+        candidates = resolved_intent.get("candidates") or []
+        candidate_list = ", ".join(candidates[:4]) if candidates else "multiple products"
+        question = f"Which product do you mean? Possible matches include: {candidate_list}."
         return {
+            "structured_intent": resolved_intent,
+            "clarification_needed": True,
+            "clarification_question": question,
+            "execution_status": "clarification_needed",
+        }
+
+    # 2. If an exact entity lookup was matched (e.g. "Database Replica Agent cost?"), it is unambiguous
+    if resolved_intent.get("intent") == "entity_attribute_lookup" and resolved_intent.get("entity"):
+        return {
+            "structured_intent": resolved_intent,
             "clarification_needed": False,
             "clarification_question": None,
             "execution_status": "intent_verified",
         }
 
-    # Deterministic ambiguity evaluation
+    # 3. Check short phrase / broad query ambiguity
     normalized = user_query.lower().strip("?.! ")
     words = normalized.split()
 
@@ -82,6 +87,7 @@ def intent_clarification_guard_node(state: AgentState) -> Dict[str, Any]:
             "product", "category", "tier", "severity", "status", "warehouse",
             "top", "highest", "most", "lowest", "count", "total", "average",
             "sum", "below", "above", "greater", "less", "list all", "each", "by", "correlate",
+            "cost", "price", "stock",
         )
     )
 
@@ -108,12 +114,31 @@ def intent_clarification_guard_node(state: AgentState) -> Dict[str, Any]:
             )
 
         return {
+            "structured_intent": resolved_intent,
             "clarification_needed": True,
             "clarification_question": question,
             "execution_status": "clarification_needed",
         }
 
+    # Optional LLM guard check when local Ollama is running
+    llm_result = default_llm_client.generate_json(
+        prompt=format_guard_prompt(user_query, messages),
+        system_prompt=GUARD_SYSTEM_PROMPT,
+    )
+    if llm_result and isinstance(llm_result.get("clarification_needed"), bool):
+        if llm_result["clarification_needed"]:
+            question = llm_result.get("clarification_question") or (
+                "Could you please clarify the specific metric, breakdown dimension, or time period you want to analyze?"
+            )
+            return {
+                "structured_intent": resolved_intent,
+                "clarification_needed": True,
+                "clarification_question": question,
+                "execution_status": "clarification_needed",
+            }
+
     return {
+        "structured_intent": resolved_intent,
         "clarification_needed": False,
         "clarification_question": None,
         "execution_status": "intent_verified",

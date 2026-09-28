@@ -79,9 +79,14 @@ def error_recovery_node(state: AgentState) -> Dict[str, Any]:
         for pattern, replacement in COMMON_COLUMN_CORRECTIONS.items():
             repaired_sql = re.sub(pattern, replacement, repaired_sql, flags=re.IGNORECASE)
 
-        # If column substitution didn't change the query or it was an AST/syntax rejection, regenerate clean dialect SQL
-        if repaired_sql == current_sql or source in validation_errors:
-            repaired_sql = generate_dialect_sql_for_source(source, user_query, join_key=primary_join_key)
+        # If column substitution didn't change the query or it was an AST/syntax/result validation rejection, regenerate clean dialect SQL
+        if repaired_sql == current_sql or source in validation_errors or "Result validation failed" in str(err_msg):
+            repaired_sql = generate_dialect_sql_for_source(
+                source,
+                user_query,
+                join_key=primary_join_key,
+                structured_intent=state.get("structured_intent"),
+            )
 
         generated_sql[source] = repaired_sql
 
