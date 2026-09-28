@@ -1,262 +1,317 @@
-const API_BASE = window.location.protocol === 'file:' || (window.location.port && window.location.port !== '8000')
-  ? 'http://localhost:8000'
-  : '';
+// Multi-Source Agentic Text-to-SQL — ChatGPT-Style Frontend Logic
 
-let currentSessionId = 'sess-' + Math.random().toString(36).substring(2, 8);
-let activeChart = null;
+const API_BASE = "";
 
-const SOURCE_LABELS = {
-  sales_pg: 'PostgreSQL (sales_pg)',
-  crm_mssql: 'SQL Server T-SQL (crm_mssql)',
-  analytics_duckdb: 'DuckDB CSV (analytics_duckdb)',
-};
+let currentSessionId = generateSessionId();
 
-function formatMarkdownBold(text) {
-  if (!text) return '';
-  return text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+function generateSessionId() {
+  return "sess-" + Math.random().toString(36).substring(2, 8);
 }
 
+document.addEventListener("DOMContentLoaded", () => {
+  updateSessionBadge();
+  checkHealth();
+  setupSidebarAccordion();
+  setupEventListeners();
+});
+
 function updateSessionBadge() {
-  const el = document.getElementById('session-id-label');
+  const el = document.getElementById("session-id-label");
   if (el) el.textContent = currentSessionId;
 }
 
 async function checkHealth() {
-  const dot = document.getElementById('health-dot');
-  const text = document.getElementById('health-text');
-  const sourcesContainer = document.getElementById('mcp-sources-badges');
+  const dot = document.getElementById("health-dot");
+  const text = document.getElementById("health-text");
 
   try {
-    const resp = await fetch(`${API_BASE}/health`);
-    const data = await resp.json();
-    dot.classList.remove('offline');
-    text.textContent = `MCP Online (${data.mcp_sources_count} Sources)`;
-    sourcesContainer.innerHTML = (data.mcp_sources || [])
-      .map(s => `<span class="badge">${s}</span>`)
-      .join('');
-  } catch (err) {
-    dot.classList.add('offline');
-    text.textContent = 'Backend Offline (Start uvicorn on :8000)';
-  }
-}
-
-function appendChatMessage(role, htmlContent, isClarification = false) {
-  const stream = document.getElementById('chat-stream');
-  const div = document.createElement('div');
-
-  if (isClarification) {
-    div.className = 'msg msg-clarification';
-    div.innerHTML = `<div class="clarification-title">Clarification Guard Interrupt</div><div>${formatMarkdownBold(htmlContent)}</div>`;
-  } else if (role === 'user') {
-    div.className = 'msg msg-user';
-    div.textContent = htmlContent;
-  } else {
-    div.className = 'msg msg-assistant';
-    div.innerHTML = formatMarkdownBold(htmlContent);
-  }
-
-  stream.appendChild(div);
-  stream.scrollTop = stream.scrollHeight;
-}
-
-function renderSQLQueries(sqlQueries) {
-  const container = document.getElementById('sql-cards-container');
-  const entries = Object.entries(sqlQueries || {});
-
-  if (entries.length === 0) {
-    container.innerHTML = `<div class="empty-placeholder">No SQL queries executed in this turn (waiting for query or clarification).</div>`;
-    return;
-  }
-
-  container.innerHTML = entries
-    .map(([source, sql]) => {
-      const label = SOURCE_LABELS[source] || source;
-      return `
-        <div class="sql-card">
-          <div class="sql-source-badge">
-            <span>${label}</span>
-            <span>READ-ONLY AST VERIFIED</span>
-          </div>
-          <pre class="sql-code">${sql}</pre>
-        </div>
-      `;
-    })
-    .join('');
-}
-
-function renderDataTable(rows) {
-  const container = document.getElementById('table-container');
-  if (!rows || rows.length === 0) {
-    container.innerHTML = `<div class="empty-placeholder">No tabular rows to display yet.</div>`;
-    return;
-  }
-
-  const columns = Object.keys(rows[0]);
-  const thead = `<thead><tr>${columns.map(c => `<th>${c}</th>`).join('')}</tr></thead>`;
-  const tbody = `<tbody>${rows
-    .map(
-      row =>
-        `<tr>${columns
-          .map(col => {
-            const val = row[col];
-            if (typeof val === 'number' && !Number.isInteger(val)) {
-              return `<td>${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>`;
-            }
-            return `<td>${val !== null && val !== undefined ? val : ''}</td>`;
-          })
-          .join('')}</tr>`
-    )
-    .join('')}</tbody>`;
-
-  container.innerHTML = `<div class="table-wrapper"><table>${thead}${tbody}</table></div>`;
-}
-
-function renderChart(vizConfig) {
-  const wrapper = document.getElementById('chart-wrapper');
-  if (!vizConfig || !vizConfig.data || vizConfig.data.length === 0 || !vizConfig.y_axes || vizConfig.y_axes.length === 0) {
-    if (activeChart) {
-      activeChart.destroy();
-      activeChart = null;
+    const res = await fetch(`${API_BASE}/health`);
+    const data = await res.json();
+    if (res.ok && data.status === "ok") {
+      if (dot) dot.style.backgroundColor = "#10a37f";
+      if (text) {
+        const count = (data.mcp_sources || []).length;
+        text.textContent = `Connected (${count} MCP Sources)`;
+      }
+    } else {
+      if (dot) dot.style.backgroundColor = "#ef4444";
+      if (text) text.textContent = "Backend Error";
     }
-    wrapper.innerHTML = `<div class="empty-placeholder">Chart visualization will appear after query execution.</div>`;
-    return;
+  } catch (err) {
+    if (dot) dot.style.backgroundColor = "#ef4444";
+    if (text) text.textContent = "Backend Offline";
   }
+}
 
-  wrapper.innerHTML = `<canvas id="results-chart"></canvas>`;
-  const ctx = document.getElementById('results-chart').getContext('2d');
-
-  const labels = vizConfig.data.map(r => String(r[vizConfig.x_axis] ?? ''));
-  const palette = [
-    { bg: 'rgba(59, 130, 246, 0.75)', border: '#3b82f6' },
-    { bg: 'rgba(244, 63, 94, 0.75)', border: '#f43f5e' },
-    { bg: 'rgba(16, 185, 129, 0.75)', border: '#10b981' },
-  ];
-
-  const datasets = vizConfig.y_axes.map((yCol, idx) => {
-    const color = palette[idx % palette.length];
-    return {
-      label: yCol,
-      data: vizConfig.data.map(r => Number(r[yCol] || 0)),
-      backgroundColor: color.bg,
-      borderColor: color.border,
-      borderWidth: 1,
-      borderRadius: 5,
-      yAxisID: idx === 0 ? 'y' : 'y1',
-    };
-  });
-
-  const scales = {
-    x: { ticks: { color: '#9ca3af' }, grid: { color: 'rgba(55, 65, 81, 0.35)' } },
-    y: {
-      type: 'linear',
-      position: 'left',
-      ticks: { color: '#9ca3af' },
-      grid: { color: 'rgba(55, 65, 81, 0.35)' },
-    },
-  };
-
-  if (datasets.length > 1) {
-    scales.y1 = {
-      type: 'linear',
-      position: 'right',
-      ticks: { color: '#fda4af' },
-      grid: { drawOnChartArea: false },
-    };
-  }
-
-  if (activeChart) {
-    activeChart.destroy();
-  }
-
-  activeChart = new Chart(ctx, {
-    type: 'bar',
-    data: { labels, datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { labels: { color: '#f9fafb' } },
-        title: {
-          display: true,
-          text: vizConfig.title || 'Cross-Source Analysis',
-          color: '#f9fafb',
-        },
-      },
-      scales,
-    },
+function setupSidebarAccordion() {
+  const headers = document.querySelectorAll(".source-header");
+  headers.forEach((header) => {
+    header.addEventListener("click", () => {
+      const parentItem = header.closest(".source-item");
+      if (!parentItem) return;
+      parentItem.classList.toggle("active");
+    });
   });
 }
 
-async function submitQuery(queryText) {
-  const input = document.getElementById('query-input');
-  const submitBtn = document.getElementById('submit-btn');
-  const trimmed = (queryText || input.value).trim();
-  if (!trimmed) return;
+function setupEventListeners() {
+  const form = document.getElementById("query-form");
+  const input = document.getElementById("query-input");
+  const resetBtn = document.getElementById("reset-session-btn");
 
-  input.value = '';
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const query = input.value.trim();
+    if (!query) return;
+    input.value = "";
+    await sendQuery(query);
+  });
+
+  // Sidebar sample queries & Welcome starter cards
+  document.querySelectorAll("[data-query]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const q = btn.getAttribute("data-query");
+      if (!q) return;
+      await sendQuery(q);
+    });
+  });
+
+  // + New Chat button
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      currentSessionId = generateSessionId();
+      updateSessionBadge();
+      const stream = document.getElementById("chat-stream");
+      // Remove all message rows and show welcome screen again
+      stream.querySelectorAll(".message-row").forEach((row) => row.remove());
+      const welcome = document.getElementById("welcome-screen");
+      if (welcome) welcome.style.display = "flex";
+    });
+  }
+}
+
+async function sendQuery(queryText) {
+  const submitBtn = document.getElementById("submit-btn");
+  const input = document.getElementById("query-input");
+  const welcome = document.getElementById("welcome-screen");
+
+  if (welcome) {
+    welcome.style.display = "none";
+  }
+
+  appendUserMessage(queryText);
+
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Running...';
-
-  appendChatMessage('user', trimmed);
+  const thinkingRow = appendThinkingMessage();
 
   try {
-    const resp = await fetch(`${API_BASE}/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const response = await fetch(`${API_BASE}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         session_id: currentSessionId,
-        query: trimmed,
+        query: queryText,
       }),
     });
 
-    const data = await resp.json();
+    const payload = await response.json();
+    thinkingRow.remove();
 
-    if (data.clarification_needed) {
-      appendChatMessage('assistant', data.clarification_question, true);
-      renderSQLQueries({});
-      input.placeholder = 'Type your clarification answer here (e.g., Total revenue by region in Q4-2025)...';
+    if (!response.ok) {
+      appendAssistantError(payload.detail || "Request failed.");
+      return;
+    }
+
+    appendAssistantResponse(payload);
+
+    if (payload.clarification_needed) {
+      input.placeholder = "Reply with clarification details (e.g. 'Total revenue by region in Q4-2025')...";
       input.focus();
     } else {
-      appendChatMessage('assistant', data.answer || 'Query completed.');
-      renderSQLQueries(data.sql_queries || {});
-      renderDataTable(data.data || []);
-      renderChart(data.visualization);
-      input.placeholder = 'Ask a question across PostgreSQL, SQL Server, and DuckDB...';
+      input.placeholder = "Message Multi-Source SQL Assistant...";
     }
   } catch (err) {
-    appendChatMessage('assistant', `Error communicating with backend API: ${err.message}`);
+    thinkingRow.remove();
+    appendAssistantError(`Network error: ${err.message}`);
   } finally {
     submitBtn.disabled = false;
-    submitBtn.textContent = 'Run Query';
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  updateSessionBadge();
-  checkHealth();
+function appendUserMessage(text) {
+  const stream = document.getElementById("chat-stream");
+  const row = document.createElement("div");
+  row.className = "message-row user";
 
-  document.getElementById('query-form').addEventListener('submit', e => {
-    e.preventDefault();
-    submitQuery();
-  });
+  const bubble = document.createElement("div");
+  bubble.className = "user-bubble";
+  bubble.textContent = text;
 
-  document.getElementById('reset-session-btn').addEventListener('click', () => {
-    currentSessionId = 'sess-' + Math.random().toString(36).substring(2, 8);
-    updateSessionBadge();
-    document.getElementById('chat-stream').innerHTML = `
-      <div class="msg msg-assistant">
-        Started new session <strong>${currentSessionId}</strong>. Select a preset benchmark query above or ask any question across Sales (PostgreSQL), CRM (SQL Server), and Inventory (DuckDB CSV).
+  row.appendChild(bubble);
+  stream.appendChild(row);
+  scrollToBottom();
+}
+
+function appendThinkingMessage() {
+  const stream = document.getElementById("chat-stream");
+  const row = document.createElement("div");
+  row.className = "message-row assistant";
+
+  row.innerHTML = `
+    <div class="assistant-wrap">
+      <div class="assistant-avatar">✦</div>
+      <div class="assistant-body">
+        <div class="thinking-dots">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+    </div>
+  `;
+  stream.appendChild(row);
+  scrollToBottom();
+  return row;
+}
+
+function appendAssistantError(errorMsg) {
+  const stream = document.getElementById("chat-stream");
+  const row = document.createElement("div");
+  row.className = "message-row assistant";
+
+  row.innerHTML = `
+    <div class="assistant-wrap">
+      <div class="assistant-avatar" style="background-color: #ef4444;">!</div>
+      <div class="assistant-body">
+        <div class="assistant-text" style="color: #fca5a5;">${escapeHtml(errorMsg)}</div>
+      </div>
+    </div>
+  `;
+  stream.appendChild(row);
+  scrollToBottom();
+}
+
+function appendAssistantResponse(payload) {
+  const stream = document.getElementById("chat-stream");
+  const row = document.createElement("div");
+  row.className = "message-row assistant";
+
+  const isClarification = Boolean(payload.clarification_needed);
+  const answerText = payload.clarification_question || payload.answer || "Query processed.";
+  const dataRows = payload.data || [];
+  const sqlQueries = payload.sql_queries || {};
+  const sqlEntries = Object.entries(sqlQueries);
+
+  let bodyHtml = "";
+
+  // 1. Clarification or Natural Language Answer
+  if (isClarification) {
+    bodyHtml += `
+      <div class="clarification-box">
+        <span class="clarification-badge">Clarification Needed</span>
+        <div class="assistant-text" style="margin-bottom: 0;">${escapeHtml(answerText)}</div>
       </div>
     `;
-    renderSQLQueries({});
-    renderDataTable([]);
-    renderChart(null);
-  });
+  } else {
+    bodyHtml += `<div class="assistant-text">${escapeHtml(answerText)}</div>`;
+  }
 
-  document.querySelectorAll('.preset-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const q = btn.getAttribute('data-query');
-      submitQuery(q);
-    });
-  });
-});
+  // 2. Inline Data Table if rows returned
+  if (dataRows.length > 0) {
+    const columns = Object.keys(dataRows[0]);
+    const ths = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+    const trs = dataRows
+      .map((r) => {
+        const tds = columns
+          .map((c) => `<td>${escapeHtml(formatValue(r[c]))}</td>`)
+          .join("");
+        return `<tr>${tds}</tr>`;
+      })
+      .join("");
+
+    bodyHtml += `
+      <div class="result-table-wrapper">
+        <div class="result-table-header">
+          <span>Query Result</span>
+          <span>${dataRows.length} row${dataRows.length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="result-table-scroll">
+          <table class="chat-table">
+            <thead><tr>${ths}</tr></thead>
+            <tbody>${trs}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  // 3. Collapsible SQL Inspector Drawer (tucked cleanly under the response)
+  if (sqlEntries.length > 0) {
+    const dialectMap = {
+      sales_pg: "PostgreSQL (sales_pg)",
+      crm_mssql: "SQL Server T-SQL (crm_mssql)",
+      analytics_duckdb: "DuckDB CSV SQL (analytics_duckdb)",
+    };
+
+    const snippets = sqlEntries
+      .map(([source, sql]) => {
+        const label = dialectMap[source] || source;
+        return `
+          <div class="sql-snippet-block">
+            <div class="sql-snippet-meta">
+              <span style="color: #93c5fd;">${escapeHtml(label)}</span>
+              <span style="color: #6ee7b7;">✓ Read-Only Verified</span>
+            </div>
+            <div class="sql-code">${escapeHtml(sql)}</div>
+          </div>
+        `;
+      })
+      .join("");
+
+    bodyHtml += `
+      <details class="sql-drawer">
+        <summary>
+          <span>View Generated SQL (${sqlEntries.length} source${sqlEntries.length === 1 ? "" : "s"})</span>
+          <span style="font-size: 0.72rem; color: var(--text-muted);">Click to expand</span>
+        </summary>
+        <div class="sql-drawer-content">
+          ${snippets}
+        </div>
+      </details>
+    `;
+  }
+
+  row.innerHTML = `
+    <div class="assistant-wrap">
+      <div class="assistant-avatar">✦</div>
+      <div class="assistant-body">
+        ${bodyHtml}
+      </div>
+    </div>
+  `;
+
+  stream.appendChild(row);
+  scrollToBottom();
+}
+
+function scrollToBottom() {
+  const feed = document.getElementById("chat-feed");
+  if (feed) {
+    feed.scrollTop = feed.scrollHeight;
+  }
+}
+
+function formatValue(val) {
+  if (val === null || val === undefined) return "—";
+  if (typeof val === "number") {
+    return Number.isInteger(val)
+      ? val.toLocaleString()
+      : val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return String(val);
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}

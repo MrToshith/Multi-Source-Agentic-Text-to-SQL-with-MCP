@@ -106,7 +106,7 @@ class TestFastAPIEndToEnd:
     def test_frontend_static_served(self, client: TestClient) -> None:
         resp_index = client.get("/")
         assert resp_index.status_code == 200
-        assert "Multi-Source Agentic Text-to-SQL Studio" in resp_index.text
+        assert "Multi-Source Text-to-SQL Assistant" in resp_index.text
 
         resp_css = client.get("/styles.css")
         assert resp_css.status_code == 200
