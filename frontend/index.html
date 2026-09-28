@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Source Agentic Text-to-SQL | MCP Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <span class="brand-badge">MCP + LangGraph</span>
+      <h1>Multi-Source Agentic Text-to-SQL Studio</h1>
+    </div>
+    <div class="status-pill">
+      <span id="health-dot" class="dot"></span>
+      <span id="health-text">Checking backend...</span>
+      <div id="mcp-sources-badges" style="display: flex; gap: 6px; margin-left: 8px;"></div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Left Column: Preset Benchmarks + Conversational Agent Stream -->
+    <div class="left-panel">
+      <!-- Quick Test Presets -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Interactive Test Scenarios</h2>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span id="session-id-label" style="font-size: 0.72rem; color: var(--text-muted); font-family: monospace;"></span>
+            <button id="reset-session-btn" class="preset-btn" style="padding: 4px 10px;">Reset Session</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="presets">
+            <button class="preset-btn" data-query="Show total revenue and open complaint count by region">
+              🌐 Cross-Source Join (PG + MSSQL)
+            </button>
+            <button class="preset-btn" data-query="List all products with warehouse stock level below 300">
+              🦆 DuckDB Inventory &amp; Products
+            </button>
+            <button class="preset-btn" data-query="Show customer complaint counts and sales order totals by region">
+              📊 Customer Complaints &amp; Sales
+            </button>
+            <button class="preset-btn" data-query="Show sales">
+              🛡️ Ambiguity Guard Test ("Show sales")
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Chat & Clarification Stream -->
+      <section class="panel chat-box">
+        <div class="panel-header">
+          <h2>Agent Workflow &amp; Multi-Turn Conversation</h2>
+          <span class="source-tag">POST /query</span>
+        </div>
+        <div id="chat-stream" class="chat-stream">
+          <div class="msg assistant">
+            <div class="msg-meta">Agent Orchestrator • Ready</div>
+            <div>
+              Welcome! Ask a natural language question across <strong>PostgreSQL</strong> (<code>sales_pg</code>),
+              <strong>SQL Server</strong> (<code>crm_mssql</code>), and <strong>DuckDB CSV Analytics</strong> (<code>analytics_duckdb</code>),
+              or click one of the preset buttons above to test the workflow.
+            </div>
+          </div>
+        </div>
+        <form id="query-form" class="input-bar">
+          <input
+            id="query-input"
+            type="text"
+            placeholder="Ask a question across PostgreSQL, SQL Server, and DuckDB (or reply to clarification)..."
+            autocomplete="off"
+          />
+          <button id="submit-btn" type="submit" class="send-btn">Run Query</button>
+        </form>
+      </section>
+    </div>
+
+    <!-- Right Column: Dialect SQL Inspector, Merged Data Table, Auto Chart -->
+    <div class="right-panel">
+      <!-- Generated Dialect-Specific SQL Cards -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Generated Dialect-Aware SQL &amp; AST Validation</h2>
+          <span class="source-tag">sqlglot Verified</span>
+        </div>
+        <div id="sql-cards-container" class="panel-body sql-cards">
+          <div class="empty-state">Run a query to inspect generated PostgreSQL, T-SQL, and DuckDB SQL statements.</div>
+        </div>
+      </section>
+
+      <!-- Cross-Source Aggregated Results Table -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Merged Cross-Source Results</h2>
+          <span class="source-tag">Pandas Aggregator</span>
+        </div>
+        <div id="table-container" class="panel-body">
+          <div class="empty-state">No data rows loaded yet.</div>
+        </div>
+      </section>
+
+      <!-- Dynamic Chart Visualization -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Automatic Data Visualization</h2>
+          <span class="source-tag">Chart.js</span>
+        </div>
+        <div class="panel-body">
+          <div id="chart-wrapper" class="chart-container">
+            <div class="empty-state">Numeric results will automatically render a chart here.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

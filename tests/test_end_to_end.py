@@ -102,3 +102,15 @@ class TestFastAPIEndToEnd:
         assert "sales_pg" in body2["sql_queries"]
         assert len(body2["data"]) > 0
         assert "North America - West" in body2["answer"]
+
+    def test_frontend_static_served(self, client: TestClient) -> None:
+        resp_index = client.get("/")
+        assert resp_index.status_code == 200
+        assert "Multi-Source Agentic Text-to-SQL Studio" in resp_index.text
+
+        resp_css = client.get("/styles.css")
+        assert resp_css.status_code == 200
+
+        resp_js = client.get("/app.js")
+        assert resp_js.status_code == 200
+
