@@ -3,288 +3,46 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Multi-Source SQL Assistant</title>
-  <link rel="stylesheet" href="styles.css?v=2" />
+  <title>Multi-Source Text-to-SQL Assistant</title>
+  <link rel="stylesheet" href="styles.css?v=3" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-  <div class="app-layout">
-    <!-- ================= LEFT SIDEBAR: DATA CATALOG & DETAILS ================= -->
-    <aside class="sidebar">
-      <div class="sidebar-top">
-        <button id="reset-session-btn" class="new-chat-btn">
-          <span>+ New Chat</span>
-          <span id="session-id-label" style="font-size: 0.72rem; color: var(--text-muted); font-family: monospace;"></span>
-        </button>
+  <div class="app">
+    <header class="header">
+      <div class="header-inner">
+        <h1 class="header-title">Multi-Source Text-to-SQL Assistant</h1>
+        <p class="header-subtitle">Connected sources: PostgreSQL • SQL Server • DuckDB</p>
       </div>
+    </header>
 
-      <div class="sidebar-section-title">Available Data to Query (Click to View)</div>
-
-      <div class="sidebar-scroll">
-        <!-- 1. SALES & REVENUE (PostgreSQL) -->
-        <div class="source-item active">
-          <button class="source-header" type="button">
-            <div class="source-title-wrap">
-              <span class="source-icon">💰</span>
-              <div>
-                <span class="source-name">Sales &amp; Revenue</span>
-                <span class="source-sub">PostgreSQL • sales_pg</span>
-              </div>
-            </div>
-            <span class="chevron">▶</span>
-          </button>
-          <div class="source-details">
-            <p class="detail-desc">Regional sales orders, revenue totals, quarterly breakdowns (Q3-2025 to Q1-2026), and regional managers.</p>
-
-            <div class="table-card">
-              <div class="table-card-header">
-                <span class="table-name">orders</span>
-                <span class="row-count">52 rows</span>
-              </div>
-              <div class="col-tags">
-                <span class="col-tag">order_id</span>
-                <span class="col-tag key">product_id</span>
-                <span class="col-tag key">region_id</span>
-                <span class="col-tag">customer_email</span>
-                <span class="col-tag">quantity</span>
-                <span class="col-tag">unit_price</span>
-                <span class="col-tag">order_total</span>
-                <span class="col-tag">quarter</span>
-                <span class="col-tag">order_status</span>
-              </div>
-            </div>
-
-            <div class="table-card">
-              <div class="table-card-header">
-                <span class="table-name">regions</span>
-                <span class="row-count">5 rows</span>
-              </div>
-              <div class="col-tags">
-                <span class="col-tag key">region_id</span>
-                <span class="col-tag">region_name</span>
-                <span class="col-tag">country</span>
-                <span class="col-tag">sales_manager</span>
-              </div>
-            </div>
-
-            <div class="try-label">Click to ask:</div>
-            <button class="sample-query-btn" data-query="Show total revenue by region in Q4-2025">
-              "Show total revenue by region in Q4-2025"
-            </button>
-            <button class="sample-query-btn" data-query="Show sales">
-              "Show sales" (Tests Clarification Prompt)
-            </button>
+    <main id="chat-container" class="chat-container">
+      <div id="chat-messages" class="chat-messages">
+        <div class="message assistant">
+          <div class="message-role">Assistant</div>
+          <div class="message-content">
+            <p class="message-text">Ask questions about your Sales, CRM, and Inventory data.</p>
           </div>
-        </div>
-
-        <!-- 2. CUSTOMERS & COMPLAINTS (SQL Server) -->
-        <div class="source-item">
-          <button class="source-header" type="button">
-            <div class="source-title-wrap">
-              <span class="source-icon">🎧</span>
-              <div>
-                <span class="source-name">Customers &amp; Complaints</span>
-                <span class="source-sub">SQL Server • crm_mssql</span>
-              </div>
-            </div>
-            <span class="chevron">▶</span>
-          </button>
-          <div class="source-details">
-            <p class="detail-desc">Enterprise/Mid-Market/SMB customer accounts and support tickets with severity and resolution status.</p>
-
-            <div class="table-card">
-              <div class="table-card-header">
-                <span class="table-name">customers</span>
-                <span class="row-count">30 rows</span>
-              </div>
-              <div class="col-tags">
-                <span class="col-tag">customer_id</span>
-                <span class="col-tag">full_name</span>
-                <span class="col-tag">company_name</span>
-                <span class="col-tag key">region_id</span>
-                <span class="col-tag">account_tier</span>
-                <span class="col-tag">email</span>
-              </div>
-            </div>
-
-            <div class="table-card">
-              <div class="table-card-header">
-                <span class="table-name">complaints</span>
-                <span class="row-count">60 rows</span>
-              </div>
-              <div class="col-tags">
-                <span class="col-tag">complaint_id</span>
-                <span class="col-tag">customer_id</span>
-                <span class="col-tag key">product_id</span>
-                <span class="col-tag">category</span>
-                <span class="col-tag">severity</span>
-                <span class="col-tag">status</span>
-                <span class="col-tag">logged_date</span>
-              </div>
-            </div>
-
-            <div class="try-label">Click to ask:</div>
-            <button class="sample-query-btn" data-query="Show open complaint count by region">
-              "Show open complaint count by region"
-            </button>
-          </div>
-        </div>
-
-        <!-- 3. PRODUCTS & INVENTORY (DuckDB CSV) -->
-        <div class="source-item">
-          <button class="source-header" type="button">
-            <div class="source-title-wrap">
-              <span class="source-icon">📦</span>
-              <div>
-                <span class="source-name">Products &amp; Inventory</span>
-                <span class="source-sub">DuckDB CSVs • analytics_duckdb</span>
-              </div>
-            </div>
-            <span class="chevron">▶</span>
-          </button>
-          <div class="source-details">
-            <p class="detail-desc">Hardware, Networking, Storage, and Security product catalog plus live warehouse stock &amp; reorder thresholds.</p>
-
-            <div class="table-card">
-              <div class="table-card-header">
-                <span class="table-name">products.csv</span>
-                <span class="row-count">10 rows</span>
-              </div>
-              <div class="col-tags">
-                <span class="col-tag key">product_id</span>
-                <span class="col-tag">sku</span>
-                <span class="col-tag">product_name</span>
-                <span class="col-tag">category</span>
-                <span class="col-tag">unit_cost</span>
-                <span class="col-tag">list_price</span>
-              </div>
-            </div>
-
-            <div class="table-card">
-              <div class="table-card-header">
-                <span class="table-name">inventory.csv</span>
-                <span class="row-count">10 rows</span>
-              </div>
-              <div class="col-tags">
-                <span class="col-tag key">product_id</span>
-                <span class="col-tag">warehouse_code</span>
-                <span class="col-tag key">region_id</span>
-                <span class="col-tag">stock_level</span>
-                <span class="col-tag">reorder_threshold</span>
-                <span class="col-tag">restock_eta_days</span>
-              </div>
-            </div>
-
-            <div class="try-label">Click to ask:</div>
-            <button class="sample-query-btn" data-query="List all products with warehouse stock level below 300">
-              "List all products with warehouse stock level below 300"
-            </button>
-          </div>
-        </div>
-
-        <!-- 4. CROSS-SOURCE JOINS -->
-        <div class="source-item">
-          <button class="source-header" type="button">
-            <div class="source-title-wrap">
-              <span class="source-icon">🔗</span>
-              <div>
-                <span class="source-name">Cross-Source Joins</span>
-                <span class="source-sub">Combine PG + MSSQL + DuckDB</span>
-              </div>
-            </div>
-            <span class="chevron">▶</span>
-          </button>
-          <div class="source-details">
-            <p class="detail-desc">Ask questions that join data across all 3 engines automatically via shared keys:</p>
-            <div class="table-card">
-              <div class="col-tags">
-                <span class="col-tag key">region_id (1..5)</span>
-                <span class="col-tag key">product_id (101..110)</span>
-              </div>
-            </div>
-            <div class="try-label">Click to ask:</div>
-            <button class="sample-query-btn" data-query="Show total revenue and open complaint count by region">
-              "Show total revenue and open complaint count by region"
-            </button>
-            <button class="sample-query-btn" data-query="Show customer complaint counts and sales order totals by region">
-              "Show customer complaint counts and sales order totals by region"
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div class="sidebar-footer">
-        <div class="status-indicator">
-          <span id="health-dot" class="status-dot"></span>
-          <span id="health-text">Connected (3 MCP Sources)</span>
-        </div>
-      </div>
-    </aside>
-
-    <!-- ================= MAIN CHATGPT WINDOW ================= -->
-    <main class="chat-main">
-      <header class="chat-topbar">
-        <div class="model-title">
-          <span>Multi-Source Text-to-SQL Assistant</span>
-          <span class="model-pill">PostgreSQL • SQL Server • DuckDB</span>
-        </div>
-      </header>
-
-      <!-- Scrollable Chat Feed -->
-      <div id="chat-feed" class="chat-feed">
-        <div id="chat-stream" class="chat-column">
-          <!-- Welcome state (hidden automatically once first message is sent) -->
-          <div id="welcome-screen" class="welcome-screen">
-            <div class="welcome-logo">✦</div>
-            <h1>What would you like to query today?</h1>
-            <p>
-              Ask in plain English. I automatically route your question across
-              <strong>Sales (PostgreSQL)</strong>, <strong>CRM &amp; Complaints (SQL Server)</strong>,
-              and <strong>Inventory (DuckDB)</strong>, or click any tab on the left to explore what data is available.
-            </p>
-
-            <div class="starter-grid">
-              <div class="starter-card" data-query="Show total revenue and open complaint count by region">
-                <div class="starter-card-title">🌐 Revenue vs. Open Complaints</div>
-                <div class="starter-card-desc">Joins PostgreSQL sales revenue with SQL Server support complaints by region</div>
-              </div>
-              <div class="starter-card" data-query="List all products with warehouse stock level below 300">
-                <div class="starter-card-title">📦 Low Warehouse Stock</div>
-                <div class="starter-card-desc">Queries DuckDB products.csv and inventory.csv for items below 300 units</div>
-              </div>
-              <div class="starter-card" data-query="Show total revenue by region in Q4-2025">
-                <div class="starter-card-title">💰 Q4-2025 Regional Sales</div>
-                <div class="starter-card-desc">Queries completed PostgreSQL orders grouped by region</div>
-              </div>
-              <div class="starter-card" data-query="Show sales">
-                <div class="starter-card-title">💬 Ambiguous Query ("Show sales")</div>
-                <div class="starter-card-desc">See how the agent asks a clarifying question before writing SQL</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Bottom ChatGPT Input Bar -->
-      <div class="composer-container">
-        <form id="query-form" class="composer-box">
-          <input
-            id="query-input"
-            class="composer-input"
-            type="text"
-            placeholder="Message Multi-Source SQL Assistant (e.g., 'Show total revenue and open complaints by region')..."
-            autocomplete="off"
-          />
-          <button id="submit-btn" type="submit" class="composer-send-btn" title="Send message">
-            ↑
-          </button>
-        </form>
-        <div class="composer-hint">
-          Click any category on the left sidebar to inspect available tables &amp; columns. Read-only AST guardrails enabled.
         </div>
       </div>
     </main>
+
+    <footer class="composer-wrapper">
+      <form id="chat-form" class="composer">
+        <textarea
+          id="chat-input"
+          class="composer-textarea"
+          rows="1"
+          placeholder="Ask a question about your data..."
+          autocomplete="off"
+        ></textarea>
+        <button id="send-button" type="submit" class="send-button" aria-label="Send">
+          ↑
+        </button>
+      </form>
+    </footer>
   </div>
 
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

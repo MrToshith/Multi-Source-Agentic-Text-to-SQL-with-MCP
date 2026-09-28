@@ -1,312 +1,234 @@
-// Multi-Source Agentic Text-to-SQL — ChatGPT-Style Frontend Logic
+const sessionId = "sess-" + Math.random().toString(36).substring(2, 10);
 
-const API_BASE = "";
+const chatContainer = document.getElementById("chat-container");
+const chatMessages = document.getElementById("chat-messages");
+const chatForm = document.getElementById("chat-form");
+const chatInput = document.getElementById("chat-input");
+const sendButton = document.getElementById("send-button");
 
-let currentSessionId = generateSessionId();
-
-function generateSessionId() {
-  return "sess-" + Math.random().toString(36).substring(2, 8);
-}
-
-document.addEventListener("DOMContentLoaded", () => {
-  updateSessionBadge();
-  checkHealth();
-  setupSidebarAccordion();
-  setupEventListeners();
+// Auto-resize textarea and handle Enter vs Shift+Enter
+chatInput.addEventListener("input", () => {
+  chatInput.style.height = "auto";
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + "px";
 });
 
-function updateSessionBadge() {
-  const el = document.getElementById("session-id-label");
-  if (el) el.textContent = currentSessionId;
-}
-
-async function checkHealth() {
-  const dot = document.getElementById("health-dot");
-  const text = document.getElementById("health-text");
-
-  try {
-    const res = await fetch(`${API_BASE}/health`);
-    const data = await res.json();
-    if (res.ok && data.status === "ok") {
-      if (dot) dot.style.backgroundColor = "#10a37f";
-      if (text) {
-        const count = (data.mcp_sources || []).length;
-        text.textContent = `Connected (${count} MCP Sources)`;
-      }
-    } else {
-      if (dot) dot.style.backgroundColor = "#ef4444";
-      if (text) text.textContent = "Backend Error";
-    }
-  } catch (err) {
-    if (dot) dot.style.backgroundColor = "#ef4444";
-    if (text) text.textContent = "Backend Offline";
-  }
-}
-
-function setupSidebarAccordion() {
-  const headers = document.querySelectorAll(".source-header");
-  headers.forEach((header) => {
-    header.addEventListener("click", () => {
-      const parentItem = header.closest(".source-item");
-      if (!parentItem) return;
-      parentItem.classList.toggle("active");
-    });
-  });
-}
-
-function setupEventListeners() {
-  const form = document.getElementById("query-form");
-  const input = document.getElementById("query-input");
-  const resetBtn = document.getElementById("reset-session-btn");
-
-  form.addEventListener("submit", async (e) => {
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    const query = input.value.trim();
-    if (!query) return;
-    input.value = "";
-    await sendQuery(query);
-  });
-
-  // Sidebar sample queries & Welcome starter cards
-  document.querySelectorAll("[data-query]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const q = btn.getAttribute("data-query");
-      if (!q) return;
-      await sendQuery(q);
-    });
-  });
-
-  // + New Chat button
-  if (resetBtn) {
-    resetBtn.addEventListener("click", () => {
-      currentSessionId = generateSessionId();
-      updateSessionBadge();
-      const stream = document.getElementById("chat-stream");
-      // Remove all message rows and show welcome screen again
-      stream.querySelectorAll(".message-row").forEach((row) => row.remove());
-      const welcome = document.getElementById("welcome-screen");
-      if (welcome) welcome.style.display = "flex";
-    });
+    chatForm.requestSubmit();
   }
-}
+});
 
-async function sendQuery(queryText) {
-  const submitBtn = document.getElementById("submit-btn");
-  const input = document.getElementById("query-input");
-  const welcome = document.getElementById("welcome-screen");
+chatForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const query = chatInput.value.trim();
+  if (!query || sendButton.disabled) return;
 
-  if (welcome) {
-    welcome.style.display = "none";
-  }
+  chatInput.value = "";
+  chatInput.style.height = "auto";
 
-  appendUserMessage(queryText);
+  appendUserMessage(query);
+  sendButton.disabled = true;
 
-  submitBtn.disabled = true;
-  const thinkingRow = appendThinkingMessage();
+  const loadingEl = appendLoadingMessage();
 
   try {
-    const response = await fetch(`${API_BASE}/query`, {
+    const res = await fetch("/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        session_id: currentSessionId,
-        query: queryText,
+        session_id: sessionId,
+        query: query,
       }),
     });
 
-    const payload = await response.json();
-    thinkingRow.remove();
+    const data = await res.json();
+    loadingEl.remove();
 
-    if (!response.ok) {
-      appendAssistantError(payload.detail || "Request failed.");
+    if (!res.ok) {
+      appendAssistantMessage({
+        answer: data.detail || "An error occurred while processing your query.",
+      });
       return;
     }
 
-    appendAssistantResponse(payload);
-
-    if (payload.clarification_needed) {
-      input.placeholder = "Reply with clarification details (e.g. 'Total revenue by region in Q4-2025')...";
-      input.focus();
-    } else {
-      input.placeholder = "Message Multi-Source SQL Assistant...";
-    }
+    appendAssistantMessage(data);
   } catch (err) {
-    thinkingRow.remove();
-    appendAssistantError(`Network error: ${err.message}`);
+    loadingEl.remove();
+    appendAssistantMessage({
+      answer: `Unable to reach backend: ${err.message}`,
+    });
   } finally {
-    submitBtn.disabled = false;
+    sendButton.disabled = false;
+    chatInput.focus();
   }
-}
+});
 
 function appendUserMessage(text) {
-  const stream = document.getElementById("chat-stream");
-  const row = document.createElement("div");
-  row.className = "message-row user";
-
-  const bubble = document.createElement("div");
-  bubble.className = "user-bubble";
-  bubble.textContent = text;
-
-  row.appendChild(bubble);
-  stream.appendChild(row);
-  scrollToBottom();
-}
-
-function appendThinkingMessage() {
-  const stream = document.getElementById("chat-stream");
-  const row = document.createElement("div");
-  row.className = "message-row assistant";
-
-  row.innerHTML = `
-    <div class="assistant-wrap">
-      <div class="assistant-avatar">✦</div>
-      <div class="assistant-body">
-        <div class="thinking-dots">
-          <span></span><span></span><span></span>
-        </div>
-      </div>
+  const msg = document.createElement("div");
+  msg.className = "message user";
+  msg.innerHTML = `
+    <div class="message-role">You</div>
+    <div class="message-content">
+      <p class="message-text">${escapeHtml(text)}</p>
     </div>
   `;
-  stream.appendChild(row);
+  chatMessages.appendChild(msg);
   scrollToBottom();
-  return row;
 }
 
-function appendAssistantError(errorMsg) {
-  const stream = document.getElementById("chat-stream");
-  const row = document.createElement("div");
-  row.className = "message-row assistant";
-
-  row.innerHTML = `
-    <div class="assistant-wrap">
-      <div class="assistant-avatar" style="background-color: #ef4444;">!</div>
-      <div class="assistant-body">
-        <div class="assistant-text" style="color: #fca5a5;">${escapeHtml(errorMsg)}</div>
-      </div>
+function appendLoadingMessage() {
+  const msg = document.createElement("div");
+  msg.className = "message assistant";
+  msg.innerHTML = `
+    <div class="message-role">Assistant</div>
+    <div class="message-content">
+      <p class="message-text" style="color: var(--text-muted);">Thinking...</p>
     </div>
   `;
-  stream.appendChild(row);
+  chatMessages.appendChild(msg);
   scrollToBottom();
+  return msg;
 }
 
-function appendAssistantResponse(payload) {
-  const stream = document.getElementById("chat-stream");
-  const row = document.createElement("div");
-  row.className = "message-row assistant";
+function appendAssistantMessage(payload) {
+  const msg = document.createElement("div");
+  msg.className = "message assistant";
 
-  const isClarification = Boolean(payload.clarification_needed);
-  const answerText = payload.clarification_question || payload.answer || "Query processed.";
-  const dataRows = payload.data || [];
+  const role = document.createElement("div");
+  role.className = "message-role";
+  role.textContent = "Assistant";
+
+  const content = document.createElement("div");
+  content.className = "message-content";
+
+  // 1. Assistant answer or clarification question
+  const textEl = document.createElement("p");
+  textEl.className = "message-text";
+  textEl.textContent =
+    payload.clarification_question ||
+    payload.answer ||
+    "Completed.";
+  content.appendChild(textEl);
+
+  // 2. Simple table if tabular data is returned
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  if (rows.length > 0) {
+    const columns = Object.keys(rows[0]);
+    const tableWrap = document.createElement("div");
+    tableWrap.className = "table-wrap";
+
+    const thead = `<thead><tr>${columns
+      .map((col) => `<th>${escapeHtml(col)}</th>`)
+      .join("")}</tr></thead>`;
+
+    const tbody = `<tbody>${rows
+      .map(
+        (row) =>
+          `<tr>${columns
+            .map((col) => `<td>${escapeHtml(formatCell(row[col]))}</td>`)
+            .join("")}</tr>`
+      )
+      .join("")}</tbody>`;
+
+    tableWrap.innerHTML = `<table class="data-table">${thead}${tbody}</table>`;
+    content.appendChild(tableWrap);
+  }
+
+  // 3. Small optional chart only when chart config is provided by backend
+  if (payload.chart && rows.length > 0 && typeof Chart !== "undefined") {
+    const chartEl = buildChartElement(payload.chart, rows);
+    if (chartEl) {
+      content.appendChild(chartEl);
+    }
+  }
+
+  // 4. Collapsible SQL section (closed by default)
   const sqlQueries = payload.sql_queries || {};
   const sqlEntries = Object.entries(sqlQueries);
-
-  let bodyHtml = "";
-
-  // 1. Clarification or Natural Language Answer
-  if (isClarification) {
-    bodyHtml += `
-      <div class="clarification-box">
-        <span class="clarification-badge">Clarification Needed</span>
-        <div class="assistant-text" style="margin-bottom: 0;">${escapeHtml(answerText)}</div>
-      </div>
-    `;
-  } else {
-    bodyHtml += `<div class="assistant-text">${escapeHtml(answerText)}</div>`;
-  }
-
-  // 2. Inline Data Table if rows returned
-  if (dataRows.length > 0) {
-    const columns = Object.keys(dataRows[0]);
-    const ths = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
-    const trs = dataRows
-      .map((r) => {
-        const tds = columns
-          .map((c) => `<td>${escapeHtml(formatValue(r[c]))}</td>`)
-          .join("");
-        return `<tr>${tds}</tr>`;
-      })
-      .join("");
-
-    bodyHtml += `
-      <div class="result-table-wrapper">
-        <div class="result-table-header">
-          <span>Query Result</span>
-          <span>${dataRows.length} row${dataRows.length === 1 ? "" : "s"}</span>
-        </div>
-        <div class="result-table-scroll">
-          <table class="chat-table">
-            <thead><tr>${ths}</tr></thead>
-            <tbody>${trs}</tbody>
-          </table>
-        </div>
-      </div>
-    `;
-  }
-
-  // 3. Collapsible SQL Inspector Drawer (tucked cleanly under the response)
   if (sqlEntries.length > 0) {
-    const dialectMap = {
-      sales_pg: "PostgreSQL (sales_pg)",
-      crm_mssql: "SQL Server T-SQL (crm_mssql)",
-      analytics_duckdb: "DuckDB CSV SQL (analytics_duckdb)",
-    };
+    const details = document.createElement("details");
+    details.className = "sql-collapsible";
 
-    const snippets = sqlEntries
-      .map(([source, sql]) => {
-        const label = dialectMap[source] || source;
-        return `
-          <div class="sql-snippet-block">
-            <div class="sql-snippet-meta">
-              <span style="color: #93c5fd;">${escapeHtml(label)}</span>
-              <span style="color: #6ee7b7;">✓ Read-Only Verified</span>
-            </div>
-            <div class="sql-code">${escapeHtml(sql)}</div>
-          </div>
-        `;
-      })
+    const itemsHtml = sqlEntries
+      .map(
+        ([source, sql]) => `
+        <div>
+          <div class="sql-item-source">${escapeHtml(source)}</div>
+          <pre class="sql-item-code">${escapeHtml(sql)}</pre>
+        </div>
+      `
+      )
       .join("");
 
-    bodyHtml += `
-      <details class="sql-drawer">
-        <summary>
-          <span>View Generated SQL (${sqlEntries.length} source${sqlEntries.length === 1 ? "" : "s"})</span>
-          <span style="font-size: 0.72rem; color: var(--text-muted);">Click to expand</span>
-        </summary>
-        <div class="sql-drawer-content">
-          ${snippets}
-        </div>
-      </details>
+    details.innerHTML = `
+      <summary>View generated SQL</summary>
+      <div class="sql-list">${itemsHtml}</div>
     `;
+    content.appendChild(details);
   }
 
-  row.innerHTML = `
-    <div class="assistant-wrap">
-      <div class="assistant-avatar">✦</div>
-      <div class="assistant-body">
-        ${bodyHtml}
-      </div>
-    </div>
-  `;
-
-  stream.appendChild(row);
+  msg.appendChild(role);
+  msg.appendChild(content);
+  chatMessages.appendChild(msg);
   scrollToBottom();
 }
 
-function scrollToBottom() {
-  const feed = document.getElementById("chat-feed");
-  if (feed) {
-    feed.scrollTop = feed.scrollHeight;
-  }
+function buildChartElement(chartConfig, rows) {
+  const columns = Object.keys(rows[0]);
+  const xKey =
+    chartConfig.x_key && columns.includes(chartConfig.x_key)
+      ? chartConfig.x_key
+      : columns[0];
+  const numericCols = columns.filter(
+    (c) => c !== xKey && typeof rows[0][c] === "number"
+  );
+  if (numericCols.length === 0) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "chart-wrap";
+  const canvas = document.createElement("canvas");
+  wrap.appendChild(canvas);
+
+  const labels = rows.map((r) => String(r[xKey]));
+  const datasets = numericCols.slice(0, 2).map((col, idx) => ({
+    label: col,
+    data: rows.map((r) => Number(r[col]) || 0),
+    backgroundColor: idx === 0 ? "rgba(237, 237, 237, 0.75)" : "rgba(154, 154, 154, 0.6)",
+    borderRadius: 4,
+  }));
+
+  new Chart(canvas.getContext("2d"), {
+    type: chartConfig.chart_type === "line" ? "line" : "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: "#9a9a9a", boxWidth: 12 } },
+      },
+      scales: {
+        x: { ticks: { color: "#9a9a9a" }, grid: { color: "#262626" } },
+        y: { ticks: { color: "#9a9a9a" }, grid: { color: "#262626" } },
+      },
+    },
+  });
+
+  return wrap;
 }
 
-function formatValue(val) {
-  if (val === null || val === undefined) return "—";
+function formatCell(val) {
+  if (val === null || val === undefined) return "";
   if (typeof val === "number") {
     return Number.isInteger(val)
       ? val.toLocaleString()
       : val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
   return String(val);
+}
+
+function scrollToBottom() {
+  chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
 function escapeHtml(str) {
