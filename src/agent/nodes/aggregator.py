@@ -38,6 +38,9 @@ def cross_source_aggregator_node(state: AgentState) -> Dict[str, Any]:
             "execution_status": "aggregated",
         }
 
+    structured_intent = state.get("structured_intent") or {}
+    join_how = "inner" if structured_intent.get("intent") == "cross_source_entity_lookup" else "outer"
+
     merged_df = dataframes[0]
     for next_df in dataframes[1:]:
         common_keys = [k for k in join_keys if k in merged_df.columns and k in next_df.columns]
@@ -49,7 +52,7 @@ def cross_source_aggregator_node(state: AgentState) -> Dict[str, Any]:
                 merged_df,
                 next_df,
                 on=common_keys[0],
-                how="outer",
+                how=join_how,
                 suffixes=("", "_joined"),
             )
         else:

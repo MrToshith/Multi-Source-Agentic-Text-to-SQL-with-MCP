@@ -1,12 +1,45 @@
 """
 Dialect-Aware Text-to-SQL Generator Node.
-Uses the Planner's structured_intent to generate native read-only SQL tailored to
-PostgreSQL, SQL Server (T-SQL), and DuckDB without reinterpreting exact entity lookups into broad inventory queries.
+Generates native read-only SQL strictly from the Planner's structured_intent for:
+  1. entity_attribute_lookup
+  2. multi_attribute_lookup
+  3. attribute_difference
+  4. total_aggregation (NO GROUP BY)
+  5. count_aggregation (NO GROUP BY)
+  6. grouped_aggregation (WITH GROUP BY)
+  7. top_max_min (WITH ORDER BY & LIMIT)
+  8. cross_source_entity_lookup
+  9. cross_source_aggregation
+  10. filtering
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from src.agent.state import AgentState
-from src.agent.intent_resolver import resolve_query_intent
+from src.agent.intent_resolver import (
+    INVENTORY_TABLE_ATTRIBUTES,
+    PRODUCT_TABLE_ATTRIBUTES,
+    resolve_query_intent,
+)
+
+
+def _build_pg_where(filters: Dict[str, Any], table_alias: str = "") -> str:
+    prefix = f"{table_alias}." if table_alias else ""
+    clauses: List[str] = []
+    if filters.get("status"):
+        clauses.append(f"{prefix}status = '{filters['status']}'")
+    if filters.get("quarter"):
+        clauses.append(f"{prefix}quarter = '{filters['quarter']}'")
+    return f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+
+def _build_mssql_complaint_where(filters: Dict[str, Any], table_alias: str = "") -> str:
+    prefix = f"{table_alias}." if table_alias else ""
+    clauses: List[str] = []
+    if filters.get("quarter"):
+        clauses.append(f"{prefix}quarter = '{filters['quarter']}'")
+    if filters.get("complaint_status"):
+        clauses.append(f"{prefix}status = '{filters['complaint_status']}'")
+    return f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
 
 def generate_dialect_sql_for_source(
@@ -16,70 +49,170 @@ def generate_dialect_sql_for_source(
     structured_intent: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Produces dialect-specific SQL for a given target source and structured intent."""
-    q_lower = user_query.lower()
-    filter_q4 = "q4" in q_lower or "last quarter" in q_lower
     intent_obj = structured_intent or resolve_query_intent(user_query)
     intent_type = intent_obj.get("intent")
+    filters = intent_obj.get("filters") or {}
 
+    # =========================================================================
+    # SOURCE 1: PostgreSQL (sales_pg)
+    # =========================================================================
     if source == "sales_pg":
-        # PostgreSQL dialect (uses LIMIT)
-        if join_key == "product_id" or ("product" in q_lower and "region" not in q_lower):
+        # 8. Cross-Source Entity Lookup (e.g. Highest-value completed order in Q4-2025 -> customer_id)
+        if intent_type == "cross_source_entity_lookup":
+            where_sql = _build_pg_where(filters)
+            direction = (intent_obj.get("order_by") or {}).get("direction", "DESC")
+            limit_val = int(intent_obj.get("limit") or 1)
             return (
-                "SELECT oi.product_id, SUM(oi.quantity) AS total_quantity_sold, "
-                "SUM(oi.subtotal) AS total_revenue "
-                "FROM order_items oi "
-                "JOIN orders o ON oi.order_id = o.order_id "
-                "WHERE o.status = 'COMPLETED' "
-                "GROUP BY oi.product_id "
-                "ORDER BY total_revenue DESC "
-                "LIMIT 50"
-            )
-        if join_key == "customer_id" and "region" not in q_lower:
-            return (
-                "SELECT o.customer_id, o.region_id, COUNT(o.order_id) AS order_count, "
-                "SUM(o.total_amount) AS total_revenue "
-                "FROM orders o "
-                "WHERE o.status = 'COMPLETED' "
-                "GROUP BY o.customer_id, o.region_id "
-                "ORDER BY total_revenue DESC "
-                "LIMIT 50"
-            )
-        where_clause = "WHERE o.status = 'COMPLETED' AND o.quarter = 'Q4-2025'" if filter_q4 else "WHERE o.status = 'COMPLETED'"
-        return (
-            "SELECT r.region_id, r.region_name, COUNT(o.order_id) AS order_count, "
-            "SUM(o.total_amount) AS total_revenue "
-            "FROM regions r "
-            "JOIN orders o ON r.region_id = o.region_id "
-            f"{where_clause} "
-            "GROUP BY r.region_id, r.region_name "
-            "ORDER BY total_revenue DESC "
-            "LIMIT 50"
-        )
+                f"SELECT order_id, customer_id, total_amount, quarter, status "
+                f"FROM orders "
+                f"{where_sql} "
+                f"ORDER BY total_amount {direction} "
+                f"LIMIT {limit_val}"
+            ).replace("  ", " ").strip()
 
+        # 4. Total Aggregation (Ungrouped SUM / AVG across matching orders)
+        if intent_type == "total_aggregation":
+            where_sql = _build_pg_where(filters)
+            agg_fn = intent_obj.get("aggregation") or "SUM"
+            return (
+                f"SELECT COALESCE({agg_fn}(total_amount), 0) AS total_revenue "
+                f"FROM orders "
+                f"{where_sql}"
+            ).replace("  ", " ").strip()
+
+        # 5. Count Aggregation (Ungrouped COUNT across matching orders)
+        if intent_type == "count_aggregation":
+            where_sql = _build_pg_where(filters)
+            return (
+                f"SELECT COUNT(order_id) AS order_count "
+                f"FROM orders "
+                f"{where_sql}"
+            ).replace("  ", " ").strip()
+
+        # 7. Top / Max / Min Regional Revenue Ranking
+        if intent_type == "top_max_min":
+            where_sql = _build_pg_where(filters, table_alias="o")
+            direction = (intent_obj.get("order_by") or {}).get("direction", "DESC")
+            limit_val = int(intent_obj.get("limit") or 1)
+            return (
+                f"SELECT r.region_id, r.region_name, COUNT(o.order_id) AS order_count, "
+                f"SUM(o.total_amount) AS total_revenue "
+                f"FROM regions r "
+                f"JOIN orders o ON r.region_id = o.region_id "
+                f"{where_sql} "
+                f"GROUP BY r.region_id, r.region_name "
+                f"ORDER BY total_revenue {direction} "
+                f"LIMIT {limit_val}"
+            ).replace("  ", " ").strip()
+
+        # 6 & 9. Grouped Aggregation / Cross-Source Aggregation by Region
+        where_sql = _build_pg_where(filters, table_alias="o")
+        return (
+            f"SELECT r.region_id, r.region_name, COUNT(o.order_id) AS order_count, "
+            f"SUM(o.total_amount) AS total_revenue "
+            f"FROM regions r "
+            f"JOIN orders o ON r.region_id = o.region_id "
+            f"{where_sql} "
+            f"GROUP BY r.region_id, r.region_name "
+            f"ORDER BY total_revenue DESC "
+            f"LIMIT 50"
+        ).replace("  ", " ").strip()
+
+    # =========================================================================
+    # SOURCE 2: SQL Server (crm_mssql)
+    # =========================================================================
     if source == "crm_mssql":
-        # SQL Server T-SQL dialect (uses SELECT TOP and dbo. schema prefix)
-        if join_key == "customer_id" and "region" not in q_lower:
+        # 8. Cross-Source Entity Lookup (Lookup customer name and company by customer_id)
+        if intent_type == "cross_source_entity_lookup":
+            target_cid = intent_obj.get("target_customer_id")
+            if target_cid is not None:
+                return (
+                    f"SELECT TOP 1 customer_id, customer_name, company_name, tier, region_id "
+                    f"FROM dbo.customers "
+                    f"WHERE customer_id = {int(target_cid)}"
+                )
             return (
-                "SELECT TOP 50 c.customer_id, c.customer_name, c.company_name, c.region_id, c.tier, "
-                "COUNT(comp.complaint_id) AS complaint_count "
-                "FROM dbo.customers c "
-                "LEFT JOIN dbo.complaints comp ON c.customer_id = comp.customer_id "
-                "GROUP BY c.customer_id, c.customer_name, c.company_name, c.region_id, c.tier "
-                "ORDER BY complaint_count DESC"
+                "SELECT TOP 50 customer_id, customer_name, company_name, tier, region_id "
+                "FROM dbo.customers"
             )
-        where_clause = "WHERE comp.quarter = 'Q4-2025'" if filter_q4 else ""
-        return (
-            "SELECT TOP 50 c.region_id, COUNT(comp.complaint_id) AS complaint_count, "
-            "COUNT(DISTINCT c.customer_id) AS affected_customers "
-            "FROM dbo.customers c "
-            "JOIN dbo.complaints comp ON c.customer_id = comp.customer_id "
-            f"{where_clause} "
-            "GROUP BY c.region_id "
-            "ORDER BY complaint_count DESC"
-        ).replace("  ", " ")
 
+        # 5. Count Aggregation (Ungrouped COUNT of complaints, e.g., "How many complaints were recorded in Q4-2025?")
+        if intent_type in ("count_aggregation", "total_aggregation"):
+            where_sql = _build_mssql_complaint_where(filters)
+            return (
+                f"SELECT COUNT(complaint_id) AS complaint_count "
+                f"FROM dbo.complaints "
+                f"{where_sql}"
+            ).replace("  ", " ").strip()
+
+        # 7. Top / Max / Min Regional Complaint Ranking
+        if intent_type == "top_max_min":
+            where_sql = _build_mssql_complaint_where(filters, table_alias="comp")
+            direction = (intent_obj.get("order_by") or {}).get("direction", "DESC")
+            limit_val = int(intent_obj.get("limit") or 1)
+            return (
+                f"SELECT TOP {limit_val} c.region_id, COUNT(comp.complaint_id) AS complaint_count "
+                f"FROM dbo.customers c "
+                f"JOIN dbo.complaints comp ON c.customer_id = comp.customer_id "
+                f"{where_sql} "
+                f"GROUP BY c.region_id "
+                f"ORDER BY complaint_count {direction}"
+            ).replace("  ", " ").strip()
+
+        # 6 & 9. Grouped Aggregation / Cross-Source Aggregation by Region
+        where_sql = _build_mssql_complaint_where(filters, table_alias="comp")
+        return (
+            f"SELECT TOP 50 c.region_id, COUNT(comp.complaint_id) AS complaint_count, "
+            f"COUNT(DISTINCT c.customer_id) AS affected_customers "
+            f"FROM dbo.customers c "
+            f"JOIN dbo.complaints comp ON c.customer_id = comp.customer_id "
+            f"{where_sql} "
+            f"GROUP BY c.region_id "
+            f"ORDER BY complaint_count DESC"
+        ).replace("  ", " ").strip()
+
+    # =========================================================================
+    # SOURCE 3: DuckDB (analytics_duckdb)
+    # =========================================================================
     if source == "analytics_duckdb":
-        # A) Exact Entity Attribute Lookup
+        # 3. Attribute Difference / Arithmetic Lookup (e.g. list_price - cost_price)
+        if intent_type == "attribute_difference" and intent_obj.get("entity"):
+            entity_val = str(intent_obj["entity"]).replace("'", "''")
+            attrs = intent_obj.get("attributes") or ["list_price", "cost_price"]
+            col_a = attrs[0] if len(attrs) >= 1 else "list_price"
+            col_b = attrs[1] if len(attrs) >= 2 else "cost_price"
+            return (
+                f"SELECT product_name, {col_a}, {col_b}, ({col_a} - {col_b}) AS price_difference "
+                f"FROM products "
+                f"WHERE product_name = '{entity_val}' "
+                f"LIMIT 1"
+            )
+
+        # 2. Multi-Attribute Entity Lookup
+        if intent_type == "multi_attribute_lookup" and intent_obj.get("entity"):
+            entity_val = str(intent_obj["entity"]).replace("'", "''")
+            attrs = intent_obj.get("attributes") or ["list_price", "cost_price"]
+            needs_inv = any(a in INVENTORY_TABLE_ATTRIBUTES for a in attrs)
+            if needs_inv:
+                select_cols = ["p.product_name"] + [
+                    f"i.{a}" if a in INVENTORY_TABLE_ATTRIBUTES else f"p.{a}" for a in attrs
+                ]
+                return (
+                    f"SELECT {', '.join(select_cols)} "
+                    f"FROM products p "
+                    f"JOIN inventory i ON p.product_id = i.product_id "
+                    f"WHERE p.product_name = '{entity_val}' "
+                    f"LIMIT 1"
+                )
+            select_cols = ["product_name"] + [a for a in attrs if a != "product_name"]
+            return (
+                f"SELECT {', '.join(select_cols)} "
+                f"FROM products "
+                f"WHERE product_name = '{entity_val}' "
+                f"LIMIT 1"
+            )
+
+        # 1. Single Entity Attribute Lookup
         if intent_type == "entity_attribute_lookup" and intent_obj.get("entity"):
             entity_val = str(intent_obj["entity"]).replace("'", "''")
             attr = intent_obj.get("attribute") or "cost_price"
@@ -100,7 +233,7 @@ def generate_dialect_sql_for_source(
                 f"LIMIT 1"
             )
 
-        # B) Filtering / Listing
+        # 10. Filtering / Listing
         if intent_type == "filtering":
             f_cond = intent_obj.get("filter_condition") or {}
             col = f_cond.get("column") or "stock_level"
@@ -126,13 +259,13 @@ def generate_dialect_sql_for_source(
                 f"LIMIT 50"
             )
 
-        # C) Aggregation / Ranking
-        if intent_type == "aggregation":
-            agg_spec = intent_obj.get("aggregation")
+        # 4 & 7. Total Aggregation or Top / Max / Min Ranking on DuckDB
+        if intent_type in ("total_aggregation", "top_max_min", "aggregation"):
+            agg_spec = intent_obj.get("aggregation_spec") or intent_obj.get("aggregation")
             order_spec = intent_obj.get("order_by")
             table = intent_obj.get("table") or "products"
 
-            if agg_spec:
+            if isinstance(agg_spec, dict):
                 fn = agg_spec.get("function", "AVG")
                 col = agg_spec.get("column", "cost_price")
                 alias = f"{fn.lower()}_{col}"
@@ -157,7 +290,6 @@ def generate_dialect_sql_for_source(
                     f"LIMIT {limit_val}"
                 )
 
-        # Fallback for general cross-source product/inventory joins
         return (
             "SELECT p.product_id, p.product_name, p.category, p.cost_price, p.list_price, "
             "i.warehouse_location, i.stock_level "
