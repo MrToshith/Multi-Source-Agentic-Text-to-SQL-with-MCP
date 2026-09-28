@@ -6,7 +6,6 @@ const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const sendButton = document.getElementById("send-button");
 
-// Auto-resize textarea and handle Enter vs Shift+Enter
 chatInput.addEventListener("input", () => {
   chatInput.style.height = "auto";
   chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + "px";
@@ -102,7 +101,6 @@ function appendAssistantMessage(payload) {
   const content = document.createElement("div");
   content.className = "message-content";
 
-  // 1. Assistant answer or clarification question
   const textEl = document.createElement("p");
   textEl.className = "message-text";
   textEl.textContent =
@@ -111,7 +109,6 @@ function appendAssistantMessage(payload) {
     "Completed.";
   content.appendChild(textEl);
 
-  // 2. Simple table if tabular data is returned
   const rows = Array.isArray(payload.data) ? payload.data : [];
   if (rows.length > 0) {
     const columns = Object.keys(rows[0]);
@@ -135,15 +132,6 @@ function appendAssistantMessage(payload) {
     content.appendChild(tableWrap);
   }
 
-  // 3. Small optional chart only when chart config is provided by backend
-  if (payload.chart && rows.length > 0 && typeof Chart !== "undefined") {
-    const chartEl = buildChartElement(payload.chart, rows);
-    if (chartEl) {
-      content.appendChild(chartEl);
-    }
-  }
-
-  // 4. Collapsible SQL section (closed by default)
   const sqlQueries = payload.sql_queries || {};
   const sqlEntries = Object.entries(sqlQueries);
   if (sqlEntries.length > 0) {
@@ -172,49 +160,6 @@ function appendAssistantMessage(payload) {
   msg.appendChild(content);
   chatMessages.appendChild(msg);
   scrollToBottom();
-}
-
-function buildChartElement(chartConfig, rows) {
-  const columns = Object.keys(rows[0]);
-  const xKey =
-    chartConfig.x_key && columns.includes(chartConfig.x_key)
-      ? chartConfig.x_key
-      : columns[0];
-  const numericCols = columns.filter(
-    (c) => c !== xKey && typeof rows[0][c] === "number"
-  );
-  if (numericCols.length === 0) return null;
-
-  const wrap = document.createElement("div");
-  wrap.className = "chart-wrap";
-  const canvas = document.createElement("canvas");
-  wrap.appendChild(canvas);
-
-  const labels = rows.map((r) => String(r[xKey]));
-  const datasets = numericCols.slice(0, 2).map((col, idx) => ({
-    label: col,
-    data: rows.map((r) => Number(r[col]) || 0),
-    backgroundColor: idx === 0 ? "rgba(237, 237, 237, 0.75)" : "rgba(154, 154, 154, 0.6)",
-    borderRadius: 4,
-  }));
-
-  new Chart(canvas.getContext("2d"), {
-    type: chartConfig.chart_type === "line" ? "line" : "bar",
-    data: { labels, datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { labels: { color: "#9a9a9a", boxWidth: 12 } },
-      },
-      scales: {
-        x: { ticks: { color: "#9a9a9a" }, grid: { color: "#262626" } },
-        y: { ticks: { color: "#9a9a9a" }, grid: { color: "#262626" } },
-      },
-    },
-  });
-
-  return wrap;
 }
 
 function formatCell(val) {

@@ -19,7 +19,7 @@ class DuckDBFileAdapter(BaseSourceAdapter):
 
     def __init__(self, data_files_dir: str = None):
         self._data_files_dir = data_files_dir or config.duckdb.data_files_dir
-        self._con = duckdb.connect(database=":memory:")
+        self._con = duckdb.connect(database=config.duckdb.database_path)
         self._initialize_views()
 
     @property

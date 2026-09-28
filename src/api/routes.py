@@ -1,5 +1,5 @@
 """
-FastAPI route handlers for /query and /health endpoints.
+FastAPI route handlers and in-memory session manager for /query and /health endpoints.
 """
 
 from typing import Any, Dict, List, Optional
@@ -8,22 +8,52 @@ from pydantic import BaseModel, Field
 
 from src.agent.state import create_initial_state
 from src.agent.graph import agent_graph
-from src.api.state import session_manager
 from src.mcp_client import default_mcp_client
 
 
 router = APIRouter()
 
 
+class SessionStateManager:
+    """Tracks multi-turn conversation history in memory keyed by session_id."""
+
+    def __init__(self):
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+
+    def get_session(self, session_id: str) -> Dict[str, Any]:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = {
+                "session_id": session_id,
+                "messages": [],
+                "status": "initialized",
+                "last_state": None,
+            }
+        return self._sessions[session_id]
+
+    def append_message(self, session_id: str, role: str, content: str) -> List[Dict[str, str]]:
+        session = self.get_session(session_id)
+        session["messages"].append({"role": role, "content": content})
+        return list(session["messages"])
+
+    def update_session_state(self, session_id: str, final_state: Dict[str, Any], status: str) -> None:
+        session = self.get_session(session_id)
+        session["status"] = status
+        session["last_state"] = final_state
+
+    def clear_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+
+session_manager = SessionStateManager()
+
+
 class QueryRequest(BaseModel):
-    """Request payload for POST /query."""
-    session_id: str = Field(default="default-session", description="Conversation session identifier")
-    query: str = Field(..., min_length=1, description="Natural language analytical query or clarification response")
+    session_id: str = Field(default="default-session")
+    query: str = Field(..., min_length=1)
 
 
 class QueryResponse(BaseModel):
-    """Response payload for POST /query."""
-    status: str = Field(..., description="Workflow completion status ('completed' | 'clarification_needed' | 'error')")
+    status: str
     session_id: str
     clarification_needed: bool = False
     clarification_question: Optional[str] = None
@@ -35,7 +65,6 @@ class QueryResponse(BaseModel):
 
 @router.get("/health")
 def health_check() -> Dict[str, Any]:
-    """Returns API gateway and MCP tool layer connectivity status."""
     sources = default_mcp_client.list_data_sources()
     return {
         "status": "healthy",
@@ -47,10 +76,6 @@ def health_check() -> Dict[str, Any]:
 
 @router.post("/query", response_model=QueryResponse)
 def execute_query(payload: QueryRequest) -> QueryResponse:
-    """
-    Executes or resumes the LangGraph multi-source Text-to-SQL workflow.
-    Supports multi-turn clarification interrupts via in-memory session state.
-    """
     session_id = payload.session_id
     user_query = payload.query.strip()
 
@@ -77,7 +102,6 @@ def execute_query(payload: QueryRequest) -> QueryResponse:
     answer = final_state.get("final_answer") or "Query completed."
     session_manager.append_message(session_id, "assistant", answer)
     session_manager.update_session_state(session_id, final_state, "completed")
-    # Clear history after successful completion so subsequent fresh queries start cleanly
     session_manager.clear_session(session_id)
 
     return QueryResponse(

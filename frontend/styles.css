@@ -31,7 +31,6 @@ html, body {
   width: 100%;
 }
 
-/* Header */
 .header {
   border-bottom: 1px solid var(--border);
   padding: 14px 24px;
@@ -57,7 +56,6 @@ html, body {
   color: var(--text-muted);
 }
 
-/* Chat area */
 .chat-container {
   flex: 1;
   overflow-y: auto;
@@ -113,7 +111,6 @@ html, body {
   color: var(--text);
 }
 
-/* Simple Table */
 .table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -144,18 +141,6 @@ table.data-table tr:last-child td {
   border-bottom: none;
 }
 
-/* Small Optional Chart */
-.chart-wrap {
-  width: 100%;
-  max-width: 560px;
-  height: 240px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background-color: var(--code-bg);
-}
-
-/* Collapsible SQL */
 details.sql-collapsible {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -197,7 +182,6 @@ details.sql-collapsible summary:hover {
   word-break: break-word;
 }
 
-/* Bottom Composer */
 .composer-wrapper {
   padding: 16px 24px 24px;
   flex-shrink: 0;
