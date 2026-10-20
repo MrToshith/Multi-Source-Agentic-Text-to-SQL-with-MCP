@@ -11,13 +11,13 @@ Instead of connecting the agent directly to database drivers, all schema discove
 ## 2. Architecture
 
 ```text
-FastAPI (/query, /health) + Chat UI
+FastAPI (/query, /health) + Minimal Chat UI
         ↓
-LangGraph Agent (Intent Guard → Planner → Schema Context → Text-to-SQL → Validator → Execution → Aggregator → Explainer)
+LangGraph Agent (Intent Guard → Planner → Schema Context → Text-to-SQL → Execution / Recovery → Aggregator → Explainer)
         ↓
 MCP Client
         ↓
-Custom MCP Server (SQLGlot Read-Only Guardrails + Row Limits)
+Custom MCP Server (SQLGlot Read-Only Safety + Row Limits)
         ↓
 Source Router
    ├── PostgreSQL Adapter  → sales_db (orders, order_items, regions, sales_reps)
@@ -28,6 +28,9 @@ Source Router
 ---
 
 ## 3. Supported Data Sources
+
+> [!NOTE]
+> For complete table schemas, data types, sample data rows, cross-source key diagrams, and sample natural language queries with expected answers, see [DATA_README.md](DATA_README.md).
 
 | Source ID | Engine | Domain & Tables | Shared Keys |
 | :--- | :--- | :--- | :--- |

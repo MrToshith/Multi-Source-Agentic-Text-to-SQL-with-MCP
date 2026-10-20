@@ -8,7 +8,13 @@ const sendButton = document.getElementById("send-button");
 
 chatInput.addEventListener("input", () => {
   chatInput.style.height = "auto";
-  chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + "px";
+  const newHeight = Math.min(chatInput.scrollHeight, 160);
+  chatInput.style.height = Math.max(32, newHeight) + "px";
+  if (newHeight > 40) {
+    chatForm.style.alignItems = "flex-end";
+  } else {
+    chatForm.style.alignItems = "center";
+  }
 });
 
 chatInput.addEventListener("keydown", (e) => {
@@ -24,7 +30,8 @@ chatForm.addEventListener("submit", async (e) => {
   if (!query || sendButton.disabled) return;
 
   chatInput.value = "";
-  chatInput.style.height = "auto";
+  chatInput.style.height = "32px";
+  chatForm.style.alignItems = "center";
 
   appendUserMessage(query);
   sendButton.disabled = true;

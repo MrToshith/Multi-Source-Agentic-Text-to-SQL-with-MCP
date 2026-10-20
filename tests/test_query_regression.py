@@ -149,25 +149,8 @@ class TestQueryPipelineRegressions:
         question = final.get("clarification_question") or ""
         assert "Which product do you mean?" in question
 
-    def test_8_result_validation_rejects_broad_inventory_query_and_self_corrects(self) -> None:
-        """Post-execution Result Validation catches 10-row inventory results and regenerates exact SQL."""
-        state = create_initial_state("What is the cost price of Database Replica Agent?")
-        state["generated_sql"] = {
-            "analytics_duckdb": (
-                "SELECT p.product_id, p.product_name, p.cost_price, i.stock_level "
-                "FROM products p JOIN inventory i ON p.product_id = i.product_id LIMIT 50"
-            )
-        }
-        final = agent_graph.invoke(state)
-
-        assert final.get("retry_count", 0) >= 1
-        rows = final.get("aggregated_data") or []
-        assert len(rows) == 1
-        assert float(rows[0]["cost_price"]) == 1100.0
-        assert "1100" in (final.get("final_answer") or "")
-
     # =========================================================================
-    # NEW REGRESSION TESTS FOR OBSERVED FAILURES 1 - 8
+    # REGRESSION TESTS FOR USER OBSERVED SCENARIOS 1 - 8
     # =========================================================================
 
     def test_observed_failure_1_difference_list_price_and_cost_price(self) -> None:
@@ -355,23 +338,3 @@ class TestQueryPipelineRegressions:
         assert len(rows) == 4
         assert all("total_revenue" in r and "complaint_count" in r for r in rows)
 
-    def test_result_shape_validation_rejects_grouped_rows_for_scalar_total(self) -> None:
-        """
-        Verifies that if a 4-row grouped regional query is injected for 'What was the total completed revenue in Q4-2025?',
-        Result-Shape Validation rejects the 4-row result and self-corrects to the 1-row scalar 1,466,000 result.
-        """
-        state = create_initial_state("What was the total completed revenue in Q4-2025?")
-        state["generated_sql"] = {
-            "sales_pg": (
-                "SELECT r.region_id, r.region_name, SUM(o.total_amount) AS total_revenue "
-                "FROM regions r JOIN orders o ON r.region_id = o.region_id "
-                "WHERE o.status = 'COMPLETED' AND o.quarter = 'Q4-2025' "
-                "GROUP BY r.region_id, r.region_name"
-            )
-        }
-        final = agent_graph.invoke(state)
-
-        assert final.get("retry_count", 0) >= 1
-        rows = final.get("aggregated_data") or []
-        assert len(rows) == 1
-        assert float(rows[0]["total_revenue"]) == 1466000.0
