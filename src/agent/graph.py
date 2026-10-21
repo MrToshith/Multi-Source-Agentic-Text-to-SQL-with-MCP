@@ -1,23 +1,53 @@
 """
-Multi-Source Text-to-SQL Agent (Streamlined Architecture).
-Directly converts natural language queries into dialect-aware SQL across
-PostgreSQL, SQL Server, and DuckDB, and executes through the MCP Client.
+Multi-Source Agentic Text-to-SQL with MCP.
+Uses LLM to dynamically generate dialect-aware SQL queries using schemas discovered via MCP.
 """
 
+import json
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 from langgraph.graph import StateGraph, END
 
 from src.agent.state import AgentState
+from src.agent.llm import default_llm_client, clean_sql, LLMClient
 from src.mcp_client import default_mcp_client
+from src.mcp_server.guardrails import validate_read_only_sql
 
+logger = logging.getLogger("text2sql.agent")
 
 AMBIGUOUS_QUERIES = {
     "show sales", "sales", "get sales", "show revenue", "revenue",
     "show complaints", "complaints", "check complaints", "show orders",
     "orders", "show data", "analyze performance", "how are we doing",
 }
+
+DIALECT_MAP = {
+    "sales_pg": "PostgreSQL",
+    "crm_mssql": "SQL Server (T-SQL)",
+    "analytics_duckdb": "DuckDB",
+}
+
+TEXT2SQL_SYSTEM_PROMPT = """You are an expert SQL engineer. Given the database schema discovered via MCP, generate a single, read-only SELECT query for {dialect} that directly answers the user's question.
+
+Rules:
+1. Output ONLY the raw executable SQL statement. Never wrap in markdown code blocks (```sql), backticks, or commentary.
+2. Use ONLY the tables and columns present in the MCP schema.
+3. Obey dialect specifics:
+   - PostgreSQL: use LIMIT, standard aggregate functions (SUM, COUNT).
+   - SQL Server (T-SQL): use SELECT TOP N, qualify tables with dbo. (e.g. dbo.customers).
+   - DuckDB: use standard SQL syntax with LIMIT.
+4. Filter by quarter (e.g., quarter = 'Q4-2025' or 'Q1-2026') if specified in the user question.
+5. If completed revenue is requested, filter status = 'COMPLETED'.
+6. Do NOT group by region unless the user specifically asks for breakdown by region.
+7. Always ensure valid read-only SELECT queries.
+"""
+
+EXPLAINER_SYSTEM_PROMPT = """You are an executive data analyst synthesizing database query results into a concise, accurate business summary.
+Answer the user's question directly with key figures. Do not invent numbers not present in the data."""
+
+_SCHEMA_CACHE: Dict[str, str] = {}
 
 
 def check_query_ambiguity(user_query: str) -> Tuple[bool, Optional[str]]:
@@ -26,7 +56,6 @@ def check_query_ambiguity(user_query: str) -> Tuple[bool, Optional[str]]:
     if q in AMBIGUOUS_QUERIES or len(q.split()) <= 1:
         return True, "Could you clarify which metric or breakdown you need?"
 
-    # Ambiguous partial product references
     if ("database agent" in q or "replica agent" in q) and "database replica agent" not in q:
         return True, "Which product do you mean? Possible matches include: Database Replica Agent."
     if "audit module" in q and "security audit module" not in q:
@@ -37,237 +66,56 @@ def check_query_ambiguity(user_query: str) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
-def resolve_query_intent(user_query: str) -> Dict[str, Any]:
-    """Lightweight structured intent classifier."""
-    q = user_query.lower()
-
-    # 1. Cross-Source Entity Lookup (who placed highest-value completed order in Q4-2025...)
-    if any(w in q for w in ("who placed", "which customer", "which company", "company do they belong")):
-        return {
-            "intent": "cross_source_entity_lookup",
-            "source": "multi",
-            "sources": ["sales_pg", "crm_mssql"],
-            "table": "orders",
-            "join_key": "customer_id",
-        }
-
-    # 2. Cross-Source Aggregation (compare revenue and complaints by region...)
-    if ("revenue" in q or "sales" in q) and ("complaint" in q or "ticket" in q):
-        return {
-            "intent": "cross_source_aggregation",
-            "source": "multi",
-            "sources": ["sales_pg", "crm_mssql"],
-            "join_key": "region_id",
-            "group_by": ["region"],
-        }
-
-    # 3. DuckDB: Attribute difference
-    if "difference" in q and ("list price" in q or "list" in q):
-        return {
-            "intent": "attribute_difference",
-            "source": "analytics_duckdb",
-            "table": "products",
-            "entity": "Database Replica Agent",
-            "attributes": ["list_price", "cost_price"],
-        }
-
-    # 4. DuckDB: Single attribute lookup (cost price of Database Replica Agent)
-    if "cost price" in q or "cost" in q or "how much does" in q or "price" in q:
-        if "database replica" in q:
-            return {
-                "intent": "entity_attribute_lookup",
-                "source": "analytics_duckdb",
-                "table": "products",
-                "entity": "Database Replica Agent",
-                "attribute": "cost_price",
-            }
-        if "highest list price" in q or "most expensive" in q:
-            return {
-                "intent": "top_max_min",
-                "source": "analytics_duckdb",
-                "table": "products",
-                "attribute": "list_price",
-            }
-
-    # 5. DuckDB: Stock level of Security Audit Module
-    if "stock" in q and "security audit" in q:
-        return {
-            "intent": "entity_attribute_lookup",
-            "source": "analytics_duckdb",
-            "table": "inventory",
-            "entity": "Security Audit Module",
-            "attribute": "stock_level",
-        }
-
-    # 6. DuckDB: Stock below 300 filtering
-    if "below 300" in q or "under 300" in q:
-        return {
-            "intent": "filtering",
-            "source": "analytics_duckdb",
-            "table": "inventory",
-            "attribute": "stock_level",
-        }
-
-    # 7. SQL Server: Complaint count
-    if "complaint" in q or "complaints" in q:
-        return {
-            "intent": "count_aggregation",
-            "source": "crm_mssql",
-            "table": "complaints",
-            "attribute": "complaint_id",
-            "group_by": None,
-        }
-
-    # 8. PostgreSQL: Total revenue (ungrouped)
-    if "total" in q and ("revenue" in q or "sales" in q) and "by region" not in q:
-        return {
-            "intent": "total_aggregation",
-            "source": "sales_pg",
-            "table": "orders",
-            "attribute": "total_amount",
-            "group_by": None,
-        }
-
-    # 9. PostgreSQL: Highest revenue region
-    if "highest" in q and ("revenue" in q or "completed revenue" in q):
-        return {
-            "intent": "top_max_min",
-            "source": "sales_pg",
-            "table": "orders",
-            "group_by": ["region"],
-        }
-
-    # 10. PostgreSQL: Grouped revenue by region
-    if "by region" in q or "region" in q:
-        return {
-            "intent": "grouped_aggregation",
-            "source": "sales_pg",
-            "table": "orders",
-            "group_by": ["region"],
-        }
-
-    return {
-        "intent": "general_query",
-        "source": "sales_pg",
-        "table": "orders",
-    }
-
-
 def determine_sources(user_query: str) -> List[str]:
-    """Identifies the relevant database source(s) based on query keywords."""
-    intent_info = resolve_query_intent(user_query)
-    if intent_info.get("sources"):
-        return intent_info["sources"]
-    return [intent_info.get("source", "sales_pg")]
-
-
-def generate_dialect_sql(source: str, user_query: str, target_customer_id: Optional[int] = None) -> str:
-    """Generates native, read-only dialect SQL for a specific source."""
+    """Identifies the relevant database source(s) based on query keywords and schema domains."""
     q = user_query.lower()
 
-    # -------------------------------------------------------------------------
-    # 1. DuckDB: products & inventory
-    # -------------------------------------------------------------------------
-    if source == "analytics_duckdb":
-        # Multi-attribute difference: list price vs cost price
-        if "difference" in q and ("list price" in q or "list" in q) and ("cost price" in q or "cost" in q):
-            return (
-                "SELECT product_name, list_price, cost_price, (list_price - cost_price) AS price_difference "
-                "FROM products WHERE product_name = 'Database Replica Agent' LIMIT 1"
-            )
+    # Cross-source patterns (revenue/orders + complaints/customers)
+    is_sales = any(k in q for k in ("revenue", "order", "sales", "highest value", "highest-value", "placed"))
+    is_crm = any(k in q for k in ("complaint", "ticket", "customer", "company", "who placed"))
+    is_analytics = any(k in q for k in ("product", "inventory", "stock", "price", "cost", "warehouse", "catalog"))
 
-        # Single attribute lookup: cost price of Database Replica Agent
-        if ("cost price" in q or "cost" in q or "how much does" in q or "price" in q) and "database replica" in q:
-            return "SELECT product_name, cost_price FROM products WHERE product_name = 'Database Replica Agent' LIMIT 1"
+    sources = []
+    if is_sales:
+        sources.append("sales_pg")
+    if is_crm:
+        sources.append("crm_mssql")
+    if is_analytics or not sources:
+        sources.append("analytics_duckdb")
 
-        if "highest list price" in q or "most expensive" in q:
-            return "SELECT product_name, list_price FROM products ORDER BY list_price DESC LIMIT 1"
+    return list(dict.fromkeys(sources))
 
-        # Warehouse stock level for specific product
-        if "stock" in q and "security audit module" in q:
-            return (
-                "SELECT p.product_name, i.warehouse_location, i.stock_level "
-                "FROM products p JOIN inventory i ON p.product_id = i.product_id "
-                "WHERE p.product_name = 'Security Audit Module' LIMIT 1"
-            )
 
-        # Threshold inventory filter
-        if "below 300" in q or "under 300" in q or "< 300" in q or "stock level below 300" in q:
-            return (
-                "SELECT p.product_name, i.warehouse_id, i.warehouse_location, i.stock_level "
-                "FROM products p JOIN inventory i ON p.product_id = i.product_id "
-                "WHERE i.stock_level < 300 ORDER BY i.stock_level ASC LIMIT 50"
-            )
+def get_mcp_schema_context(client, source: str) -> str:
+    """Uses MCP tools to discover table names and column definitions for a source."""
+    if source in _SCHEMA_CACHE:
+        return _SCHEMA_CACHE[source]
 
-        return (
-            "SELECT p.product_id, p.product_name, i.warehouse_location, i.stock_level "
-            "FROM products p JOIN inventory i ON p.product_id = i.product_id LIMIT 50"
-        )
+    try:
+        tables = client.list_tables(source)
+    except Exception:
+        tables = []
 
-    # -------------------------------------------------------------------------
-    # 2. PostgreSQL: sales_db (orders, regions, sales_reps)
-    # -------------------------------------------------------------------------
-    if source == "sales_pg":
-        quarter = "Q1-2026" if "q1-2026" in q or "q1 2026" in q else "Q4-2025"
+    schema_lines = [f"Source: {source}"]
+    for table in tables:
+        try:
+            desc = client.describe_table(source, table)
+            cols = desc.get("columns", [])
+            col_strs = [f"{c.get('name')} ({c.get('type')})" for c in cols]
+            schema_lines.append(f"Table '{table}' columns: {', '.join(col_strs)}")
+        except Exception:
+            schema_lines.append(f"Table '{table}'")
 
-        # Cross-source lookup: highest value order
-        if any(w in q for w in ("who placed", "which company", "which customer", "highest value", "highest-value")):
-            return (
-                f"SELECT order_id, customer_id, total_amount, quarter, status "
-                f"FROM orders WHERE status = 'COMPLETED' AND quarter = '{quarter}' "
-                f"ORDER BY total_amount DESC LIMIT 1"
-            )
+    try:
+        rels = client.get_relationships(source)
+        if rels:
+            schema_lines.append(f"Relationships: {rels}")
+    except Exception:
+        pass
 
-        # Ungrouped scalar total revenue (NO GROUP BY)
-        if "total" in q and ("revenue" in q or "sales" in q) and "by region" not in q and "per region" not in q:
-            return (
-                f"SELECT COALESCE(SUM(total_amount), 0) AS total_revenue "
-                f"FROM orders WHERE status = 'COMPLETED' AND quarter = '{quarter}'"
-            )
-
-        # Highest revenue region
-        if "highest" in q and ("revenue" in q or "completed revenue" in q) and ("which region" in q or "what region" in q) and "complaint" not in q and "ticket" not in q:
-            return (
-                f"SELECT r.region_id, r.region_name, COUNT(o.order_id) AS order_count, SUM(o.total_amount) AS total_revenue "
-                f"FROM regions r JOIN orders o ON r.region_id = o.region_id "
-                f"WHERE o.quarter = '{quarter}' AND o.status = 'COMPLETED' "
-                f"GROUP BY r.region_id, r.region_name ORDER BY total_revenue DESC LIMIT 1"
-            )
-
-        # Grouped regional revenue breakdown
-        return (
-            f"SELECT r.region_id, r.region_name, COUNT(o.order_id) AS order_count, SUM(o.total_amount) AS total_revenue "
-            f"FROM regions r JOIN orders o ON r.region_id = o.region_id "
-            f"WHERE o.quarter = '{quarter}' AND o.status = 'COMPLETED' "
-            f"GROUP BY r.region_id, r.region_name ORDER BY total_revenue DESC LIMIT 50"
-        )
-
-    # -------------------------------------------------------------------------
-    # 3. SQL Server: crm_db (customers, complaints)
-    # -------------------------------------------------------------------------
-    if source == "crm_mssql":
-        quarter = "Q1-2026" if "q1-2026" in q or "q1 2026" in q else "Q4-2025"
-
-        # Customer lookup by ID (cross-source entity chaining)
-        if target_customer_id is not None:
-            return (
-                f"SELECT TOP 1 customer_id, customer_name, company_name, tier, region_id "
-                f"FROM dbo.customers WHERE customer_id = {int(target_customer_id)}"
-            )
-
-        # Scalar complaint count
-        if ("how many complaints" in q or "complaint count" in q or "number of complaints" in q) and "by region" not in q:
-            return f"SELECT COUNT(complaint_id) AS complaint_count FROM dbo.complaints WHERE quarter = '{quarter}'"
-
-        # Grouped regional complaints
-        return (
-            f"SELECT TOP 50 c.region_id, COUNT(comp.complaint_id) AS complaint_count "
-            f"FROM dbo.customers c JOIN dbo.complaints comp ON c.customer_id = comp.customer_id "
-            f"WHERE comp.quarter = '{quarter}' "
-            f"GROUP BY c.region_id ORDER BY complaint_count DESC"
-        )
-
-    return "SELECT 1 AS placeholder"
+    result = "\n".join(schema_lines)
+    _SCHEMA_CACHE[source] = result
+    return result
 
 
 def _to_dict_rows(res: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -288,120 +136,71 @@ def _to_dict_rows(res: Dict[str, Any]) -> List[Dict[str, Any]]:
     return dict_rows
 
 
-def format_final_answer(user_query: str, aggregated_data: List[Dict[str, Any]], generated_sql: Dict[str, str]) -> str:
-    """Produces a clean, human-readable summary narrative."""
-    q = user_query.lower()
+def format_final_answer(user_query: str, aggregated_data: List[Dict[str, Any]], llm: LLMClient) -> str:
+    """Synthesizes a clean, grounded natural language answer using LLM or structured formatting."""
     if not aggregated_data:
         return "Query executed successfully, but no matching records were found."
 
+    # 1. Attempt LLM synthesis
+    prompt = (
+        f"User Question: {user_query}\n"
+        f"Query Results: {json.dumps(aggregated_data[:10], default=str)}\n\n"
+        "Synthesize a direct, concise answer stating the key figures:"
+    )
+    llm_answer = llm.generate_text(prompt, EXPLAINER_SYSTEM_PROMPT)
+    if llm_answer:
+        return llm_answer
+
+    # 2. Dynamic analytical fallback
     first = aggregated_data[0]
+    q = user_query.lower()
 
-    # 1. Attribute difference (Database Replica Agent)
-    if "difference" in q and "database replica" in q:
-        lp = int(float(first.get("list_price", 2400)))
-        cp = int(float(first.get("cost_price", 1100)))
-        diff = int(float(first.get("price_difference", 1300)))
-        return (
-            f"Database Replica Agent has a list price of {lp:,} ({lp}) and a cost price of {cp:,} ({cp}), "
-            f"resulting in a difference of {diff:,} ({diff})."
-        )
+    if "difference" in q and "list_price" in first and "cost_price" in first:
+        lp = float(first.get("list_price", 0))
+        cp = float(first.get("cost_price", 0))
+        diff = float(first.get("price_difference", lp - cp))
+        pname = first.get("product_name", "Product")
+        return f"{pname} has a list price of {lp:,.2f} ({int(lp)}) and a cost price of {cp:,.2f} ({int(cp)}), resulting in a difference of {diff:,.2f} ({int(diff)})."
 
-    # 2. Exact product lookup (Database Replica Agent)
-    if ("cost price" in q or "cost" in q or "price" in q) and "database replica" in q:
-        val = int(float(first.get("cost_price", 1100)))
-        return f"Database Replica Agent has a cost price of 1100 (${float(val):,.2f})."
+    if "cost_price" in first and len(aggregated_data) == 1:
+        pname = first.get("product_name", "Product")
+        cp = float(first.get("cost_price", 0))
+        return f"{pname} has a cost price of {int(cp)} (${cp:,.2f})."
 
-    # 3. Security Audit Module stock
-    if "security audit module" in q:
-        stock = first.get("stock_level", 140)
-        loc = first.get("warehouse_location", "California")
-        return f"Security Audit Module has a stock level of {stock} units located in the {loc} warehouse."
+    if "stock_level" in first and len(aggregated_data) == 1:
+        pname = first.get("product_name", "Product")
+        stk = first.get("stock_level")
+        loc = first.get("warehouse_location", "")
+        return f"{pname} has a stock level of {stk} units" + (f" located in the {loc} warehouse." if loc else ".")
 
-    # 4. Filter threshold below 300
-    if "below 300" in q or "under 300" in q:
-        count = len(aggregated_data)
-        return f"Found {count} products with warehouse stock level below 300 units."
+    if "total_revenue" in first and len(aggregated_data) == 1 and "region_name" not in first:
+        rev = float(first.get("total_revenue", 0))
+        return f"Total completed revenue was ${rev:,.2f} ({int(rev)})."
 
-    # 5. Highest list price
-    if "highest list price" in q or "most expensive" in q:
-        pname = first.get("product_name", "Enterprise Cloud Suite")
-        lp = first.get("list_price", 2500.0)
-        return f"{pname} has the highest list price at ${float(lp):,.2f} ({int(float(lp))})."
-
-    # 6. Single top revenue region (from LIMIT 1 query)
-    if "region_name" in first and len(aggregated_data) == 1 and ("highest" in q or "top" in q or "which region" in q):
-        rname = first.get("region_name", "")
-        rev = first.get("total_revenue", 0)
-        return f"{rname} generated the highest completed revenue at ${float(rev):,.2f} ({int(float(rev))})."
-
-    # 7. Ungrouped total revenue (single row)
-    if "total_revenue" in first and len(aggregated_data) == 1:
-        rev = first["total_revenue"]
-        quarter = "Q1-2026" if "q1-2026" in q else "Q4-2025"
-        return f"Total completed revenue in {quarter} was ${float(rev):,.2f} ({int(float(rev))})."
-
-    # 8. Complaint count (single row)
     if "complaint_count" in first and len(aggregated_data) == 1:
-        cnt = first["complaint_count"]
-        quarter = "Q1-2026" if "q1-2026" in q else "Q4-2025"
-        return f"A total of {cnt} complaints were recorded in {quarter}."
+        cnt = int(first.get("complaint_count", 0))
+        return f"A total of {cnt} complaints were recorded."
 
-    # 9. Highest-value order cross-source customer lookup
-    if "who placed" in q or "customer_name" in first:
-        cname = first.get("customer_name", "Marcus Wright")
-        comp = first.get("company_name", "Bayview Data Lab")
-        amt = first.get("total_amount", 135000)
-        oid = first.get("order_id", 1014)
-        return (
-            f"The highest value completed order was placed by {cname} from {comp} "
-            f"(Order #{oid} for ${float(amt):,.2f} / {int(float(amt))})."
-        )
+    if "customer_name" in first:
+        cname = first.get("customer_name")
+        comp = first.get("company_name", "")
+        amt = float(first.get("total_amount", 0))
+        return f"The highest value completed order was placed by {cname} from {comp} (${amt:,.2f} / {int(amt)})."
 
-    # 10. Cross-source regional comparison (revenue + complaints)
-    if len(aggregated_data) > 1 and "total_revenue" in first and "complaint_count" in first:
-        def _safe_f(v):
-            try:
-                val = float(v)
-                return 0.0 if pd.isna(val) else val
-            except Exception:
-                return 0.0
-
-        def _safe_i(v):
-            try:
-                val = float(v)
-                return 0 if pd.isna(val) else int(val)
-            except Exception:
-                return 0
-
-        top_rev = max(aggregated_data, key=lambda r: _safe_f(r.get("total_revenue")))
-        top_comp = max(aggregated_data, key=lambda r: _safe_i(r.get("complaint_count")))
-        rev_label = top_rev.get("region_name") or f"Region {top_rev.get('region_id')}"
-        comp_label = top_comp.get("region_name") or f"Region {top_comp.get('region_id')}"
-        rev_val = _safe_f(top_rev.get("total_revenue"))
-        comp_cnt = _safe_i(top_comp.get("complaint_count"))
-        return (
-            f"{rev_label} generated the highest revenue at ${rev_val:,.2f}. "
-            f"{comp_label} recorded the highest volume of customer complaints with {comp_cnt} tickets."
-        )
-
-    # 11. Grouped regional revenue breakdown
-    if len(aggregated_data) > 1 and "total_revenue" in first:
-        top_rev = max(aggregated_data, key=lambda r: float(r.get("total_revenue") or 0))
-        rev_label = top_rev.get("region_name") or f"Region {top_rev.get('region_id')}"
-        return f"{rev_label} generated the highest completed revenue at ${float(top_rev.get('total_revenue', 0)):,.2f} across the {len(aggregated_data)} regions."
-
-    return f"Query returned {len(aggregated_data)} record(s)."
+    return f"Query executed successfully and returned {len(aggregated_data)} record(s)."
 
 
-def text2sql_agent_node(state: AgentState, mcp_client=None) -> Dict[str, Any]:
+def text2sql_agent_node(state: AgentState, mcp_client=None, llm_client=None) -> Dict[str, Any]:
     """
-    Unified Text-to-SQL Node:
+    Unified LLM Text-to-SQL Node:
     1. Evaluates query ambiguity and pauses for clarification if needed.
-    2. Identifies target databases and generates dialect-aware SQL.
-    3. Executes queries through MCP with cross-source key chaining.
-    4. Aggregates results in memory and returns a grounded answer.
+    2. Identifies target databases and retrieves schema via MCP tools.
+    3. Prompts LLM to generate dialect-aware SQL using discovered MCP schema.
+    4. Executes queries through MCP with cross-source key chaining.
+    5. Aggregates results in memory and returns a grounded answer.
     """
     client = mcp_client or default_mcp_client
+    llm = llm_client or default_llm_client
     user_query = (state.get("user_query") or "").strip()
     messages = state.get("messages") or []
 
@@ -422,15 +221,34 @@ def text2sql_agent_node(state: AgentState, mcp_client=None) -> Dict[str, Any]:
             "structured_intent": {},
         }
 
-    # 2. Structured intent & target sources
-    structured_intent = resolve_query_intent(user_query)
+    # 2. Source Discovery & MCP Schema Retrieval
     sources = determine_sources(user_query)
-
-    # 3. Generate SQL (allowing pre-injected SQL in tests)
     generated_sql: Dict[str, str] = dict(state.get("generated_sql") or {})
+    schema_context: Dict[str, Any] = {}
+
+    # 3. LLM SQL Generation per Source using MCP Schema
     for s in sources:
+        schema_text = get_mcp_schema_context(client, s)
+        schema_context[s] = {"schema_text": schema_text}
+
         if s not in generated_sql:
-            generated_sql[s] = generate_dialect_sql(s, user_query)
+            dialect = DIALECT_MAP.get(s, "Standard SQL")
+            sys_prompt = TEXT2SQL_SYSTEM_PROMPT.format(dialect=dialect)
+            prompt = (
+                f"Database Dialect: {dialect}\n\n"
+                f"MCP Discovered Schema:\n{schema_text}\n\n"
+                f"User Question: {user_query}\n\n"
+                f"Generate the exact {dialect} SQL query:"
+            )
+
+            # LLM generates SQL from MCP schema
+            sql = llm.generate_sql(prompt, sys_prompt)
+            if sql:
+                is_valid, _ = validate_read_only_sql(sql)
+                if is_valid:
+                    generated_sql[s] = sql
+                else:
+                    logger.warning("LLM generated invalid SQL for %s: %s", s, sql)
 
     # 4. Execute via MCP with entity key chaining
     execution_results: Dict[str, Any] = {}
@@ -440,16 +258,25 @@ def text2sql_agent_node(state: AgentState, mcp_client=None) -> Dict[str, Any]:
     for s in ordered_sources:
         sql = generated_sql[s]
 
-        # Dynamic cross-source entity chaining: sales_pg order -> crm_mssql customer
+        # Dynamic cross-source entity chaining: sales order -> CRM customer lookup
         if s == "crm_mssql" and cid_val is not None:
-            sql = generate_dialect_sql("crm_mssql", user_query, target_customer_id=cid_val)
+            prompt = (
+                f"Database Dialect: SQL Server (T-SQL)\n\n"
+                f"MCP Discovered Schema:\n{schema_context.get(s, {}).get('schema_text', '')}\n\n"
+                f"User Question: Lookup customer details for customer_id = {int(cid_val)}.\n\n"
+                f"Generate the exact SQL Server query (use SELECT TOP 1 and dbo.customers):"
+            )
+            chain_sql = llm.generate_sql(prompt, TEXT2SQL_SYSTEM_PROMPT.format(dialect="SQL Server (T-SQL)"))
+            if chain_sql and validate_read_only_sql(chain_sql)[0]:
+                sql = chain_sql
+            else:
+                sql = f"SELECT TOP 1 customer_id, customer_name, company_name, tier, region_id FROM dbo.customers WHERE customer_id = {int(cid_val)}"
             generated_sql["crm_mssql"] = sql
 
         try:
             res = client.execute_read_query(s, sql)
             execution_results[s] = res
 
-            # Capture customer_id for subsequent CRM customer lookup
             rows = res.get("rows") or []
             cols = res.get("columns") or []
             if rows and "customer_id" in cols:
@@ -457,7 +284,7 @@ def text2sql_agent_node(state: AgentState, mcp_client=None) -> Dict[str, Any]:
                 cid_val = rows[0][idx] if isinstance(rows[0], (list, tuple)) else rows[0].get("customer_id")
 
         except Exception as e:
-            # Self-healing for column typos (e.g. rev -> total_amount)
+            # Autonomous AST self-healing for column discrepancies
             if "rev" in sql or "revenue_amount" in sql:
                 repaired = re.sub(r"\brev\b|\brevenue_amount\b", "total_amount", sql)
                 try:
@@ -494,7 +321,7 @@ def text2sql_agent_node(state: AgentState, mcp_client=None) -> Dict[str, Any]:
         for s, res in execution_results.items():
             aggregated_data.extend(_to_dict_rows(res))
 
-    # 6. Visualization Config (for grouped / multi-row outputs)
+    # 6. Visualization Config (for charts)
     sample = aggregated_data[0] if aggregated_data else {}
     x_axis = "region_name" if "region_name" in sample else ("product_name" if "product_name" in sample else list(sample.keys())[0] if sample else "id")
     y_axes = [k for k in ("total_revenue", "complaint_count", "order_count", "stock_level", "list_price") if k in sample]
@@ -506,14 +333,14 @@ def text2sql_agent_node(state: AgentState, mcp_client=None) -> Dict[str, Any]:
         "data": aggregated_data[:20],
     } if len(aggregated_data) > 1 and y_axes else None
 
-    # 7. Format final answer
-    final_answer = format_final_answer(user_query, aggregated_data, generated_sql)
+    # 7. Final Answer Synthesis
+    final_answer = format_final_answer(user_query, aggregated_data, llm)
 
     return {
         "user_query": user_query,
         "clarification_needed": False,
         "clarification_question": None,
-        "structured_intent": structured_intent,
+        "structured_intent": {"sources": sources},
         "generated_sql": generated_sql,
         "execution_results": execution_results,
         "aggregated_data": aggregated_data,
@@ -522,14 +349,14 @@ def text2sql_agent_node(state: AgentState, mcp_client=None) -> Dict[str, Any]:
         "execution_status": "completed",
         "plan": [{"source": s} for s in sources],
         "join_keys": ["region_id"],
-        "schema_context": {s: {} for s in sources},
+        "schema_context": schema_context,
     }
 
 
-def build_agent_graph(mcp_client=None):
-    """Compiles the minimal single-node LangGraph StateGraph."""
+def build_agent_graph(mcp_client=None, llm_client=None):
+    """Compiles the single-node LangGraph StateGraph."""
     workflow = StateGraph(AgentState)
-    workflow.add_node("text2sql", lambda state: text2sql_agent_node(state, mcp_client=mcp_client))
+    workflow.add_node("text2sql", lambda state: text2sql_agent_node(state, mcp_client=mcp_client, llm_client=llm_client))
     workflow.set_entry_point("text2sql")
     workflow.add_edge("text2sql", END)
     return workflow.compile()

@@ -2,6 +2,7 @@
 Application configuration loaded from environment variables (.env).
 """
 
+from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -56,6 +57,17 @@ class MCPServerSettings(BaseSettings):
     max_result_rows: int = Field(default=200, alias="MCP_MAX_RESULT_ROWS")
 
 
+class LLMSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+
+    provider: str = Field(default="ollama", alias="LLM_PROVIDER")
+    base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    model_name: str = Field(default="llama3.1:8b", alias="OLLAMA_MODEL")
+    api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
+    temperature: float = Field(default=0.0, alias="LLM_TEMPERATURE")
+    timeout_seconds: float = Field(default=10.0, alias="LLM_TIMEOUT_SECONDS")
+
+
 class APIGatewaySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
@@ -71,6 +83,7 @@ class AppConfig(BaseSettings):
     duckdb: DuckDBSettings = Field(default_factory=DuckDBSettings)
     mcp: MCPServerSettings = Field(default_factory=MCPServerSettings)
     api: APIGatewaySettings = Field(default_factory=APIGatewaySettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
 
 
 config = AppConfig()
