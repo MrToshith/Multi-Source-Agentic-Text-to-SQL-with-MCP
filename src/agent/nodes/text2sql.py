@@ -318,19 +318,38 @@ def text2sql_generator_node(state: AgentState) -> Dict[str, Any]:
     primary_join_key = join_keys[0] if join_keys else "region_id"
 
     generated_sql: Dict[str, str] = {}
-    for task in plan:
-        source = task.get("source")
-        task_join_key = task.get("join_key") or primary_join_key
-        if source:
-            if source in existing_sql:
-                generated_sql[source] = existing_sql[source]
-            else:
-                generated_sql[source] = generate_dialect_sql_for_source(
-                    source,
-                    user_query,
-                    join_key=task_join_key,
-                    structured_intent=structured_intent,
-                )
+    if plan:
+        for task in plan:
+            source = task.get("source")
+            task_join_key = task.get("join_key") or primary_join_key
+            if source:
+                if source in existing_sql:
+                    generated_sql[source] = existing_sql[source]
+                else:
+                    generated_sql[source] = generate_dialect_sql_for_source(
+                        source,
+                        user_query,
+                        join_key=task_join_key,
+                        structured_intent=structured_intent,
+                    )
+    else:
+        sources = structured_intent.get("sources") or (
+            [structured_intent.get("source")]
+            if structured_intent.get("source") and structured_intent.get("source") != "multi"
+            else ["sales_pg"]
+        )
+        for source in sources:
+            if source:
+                if source in existing_sql:
+                    generated_sql[source] = existing_sql[source]
+                else:
+                    generated_sql[source] = generate_dialect_sql_for_source(
+                        source,
+                        user_query,
+                        join_key=primary_join_key,
+                        structured_intent=structured_intent,
+                    )
+
 
     return {
         "structured_intent": structured_intent,

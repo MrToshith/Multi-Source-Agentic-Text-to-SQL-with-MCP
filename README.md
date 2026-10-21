@@ -13,7 +13,7 @@ Instead of connecting the agent directly to database drivers, all schema discove
 ```text
 FastAPI (/query, /health) + Minimal Chat UI
         ↓
-LangGraph Agent (Intent Guard → Planner → Schema Context → Text-to-SQL → Execution / Recovery → Aggregator → Explainer)
+LangGraph Agent (Intent Guard → Schema Context → Text-to-SQL → Execution / Recovery → Aggregator → Explainer)
         ↓
 MCP Client
         ↓
@@ -42,12 +42,12 @@ Source Router
 
 ## 4. Main Workflow
 
-1. **Intent & Clarification Guard:** Checks if the user query or entity reference is ambiguous (e.g., `"Show sales"` or `"What's the price of the database agent?"`) and asks a clarifying question before writing SQL.
-2. **Query Planner:** Resolves entities and attributes via MCP metadata and classifies the operation (`entity_attribute_lookup`, `multi_attribute_lookup`, `attribute_difference`, `total_aggregation`, `count_aggregation`, `grouped_aggregation`, `top_max_min`, `cross_source_entity_lookup`, `cross_source_aggregation`, `filtering`).
-3. **Schema Discovery:** Calls MCP tools (`describe_table`, `get_relationships`, `get_sample_rows`) for the planned sources and tables.
-4. **Dialect-Aware Text-to-SQL:** Generates native SQL for PostgreSQL (`LIMIT`), SQL Server (`SELECT TOP`), and DuckDB.
-5. **SQL Safety & Result-Shape Validation:** Parses candidate SQL with `sqlglot` to block mutations, executes via MCP, and verifies that the returned rows/columns match the planned intent (self-correcting up to 3 times if needed).
-6. **Cross-Source Aggregation & Explanation:** Joins multi-source results in memory with Pandas and generates a grounded natural-language answer.
+1. **Intent & Clarification Guard:** Checks if the user query or entity reference is ambiguous (e.g., `"Show sales"` or `"What's the price of the database agent?"`) and asks a clarifying question before proceeding. For clear queries, extracts the structured intent (`operation`, `filters`, `attributes`, and target sources).
+2. **Schema Discovery (Context Builder):** Performs targeted schema discovery through MCP tools (`describe_table`, `get_relationships`, `get_sample_rows`) for the identified data sources and tables.
+3. **Dialect-Aware Text-to-SQL:** Generates native SQL for PostgreSQL (`LIMIT`), SQL Server (`SELECT TOP`), and DuckDB directly matching the verified intent.
+4. **Execution & Self-Correction:** Executes queries via the MCP Client, chains dynamic entity keys across sources, and automatically repairs SQL if runtime errors occur.
+5. **Cross-Source Aggregation & Explanation:** Merges multi-source records in memory and generates a clear, grounded natural-language response.
+
 
 ---
 
