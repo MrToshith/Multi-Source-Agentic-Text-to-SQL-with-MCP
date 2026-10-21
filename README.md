@@ -16,34 +16,27 @@ Instead of connecting the agent directly to database drivers, all schema discove
 flowchart TD
     subgraph UI ["1. Client & Presentation Layer"]
         User(["User / Business Analyst"])
-        ChatUI["Minimal ChatGPT-Style Chat UI<br/>(Single input, tables, auto-collapsible SQL)"]
+        ChatUI["Minimal ChatGPT-Style Chat UI<br/>(Single input, clean tables, collapsible SQL)"]
     end
 
     subgraph API ["2. API & Orchestration Layer"]
-        FastAPI["FastAPI Application<br/>(POST /query, GET /health, Session Manager)"]
+        FastAPI["FastAPI Gateway<br/>(POST /query, GET /health, Session Manager)"]
     end
 
-    subgraph Agent ["3. LangGraph Agentic Pipeline"]
-        direction TB
-        Guard{"Intent & Clarification Guard<br/>(Entity Disambiguation & Ambiguity Check)"}
-        Context["Schema Context Builder<br/>(Targeted Schema Discovery via MCP)"]
-        Text2SQL["Dialect-Aware Text-to-SQL<br/>(PostgreSQL, T-SQL, DuckDB)"]
-        Execution["MCP Execution Coordinator<br/>(Dynamic Cross-Source Key Chaining)"]
-        Recovery["Self-Correction Recovery<br/>(Automated Column/Syntax Repair &le; 3 retries)"]
-        Aggregator["Cross-Source Aggregator<br/>(In-Memory Pandas Join on Shared Keys)"]
-        Explainer["Result Explainer<br/>(Human Narrative + Clean Table + Optional Chart)"]
+    subgraph Agent ["3. LangGraph Agent"]
+        Text2SQL["Text-to-SQL Node<br/>(Understands User Intent & Generates Dialect-Aware SQL)"]
     end
 
-    subgraph MCP ["4. Model Context Protocol (MCP) Integration"]
+    subgraph MCP ["4. Model Context Protocol (MCP) Layer"]
         MCPClient["MCP Client<br/>(Standard Tool Caller)"]
         MCPServer["Custom MCP Server<br/>(SQLGlot Read-Only AST Guardrails + Limits)"]
     end
 
-    subgraph Storage ["5. Storage & Database Adapters Layer"]
+    subgraph Storage ["5. Storage & Databases Layer"]
         Router{"Source Router"}
         PGAdapter["PostgreSQL Adapter<br/>(Read-Only Pool)"]
         MSSQLAdapter["SQL Server Adapter<br/>(Read-Only pyodbc Pool)"]
-        DuckDBAdapter["DuckDB Adapter<br/>(Read-Only Parquet/CSV Engine)"]
+        DuckDBAdapter["DuckDB Adapter<br/>(Read-Only Engine)"]
 
         PGDB[("PostgreSQL: sales_db<br/>• regions<br/>• sales_reps<br/>• orders<br/>• order_items")]
         MSSQLDB[("SQL Server: crm_db<br/>• dbo.customers<br/>• dbo.complaints")]
@@ -51,24 +44,13 @@ flowchart TD
     end
 
     %% Client / API Flow
-    User <-->|"Natural Language Prompt / Follow-up"| ChatUI
-    ChatUI <-->|"JSON Request / Response (/query)"| FastAPI
-    FastAPI <-->|"StateGraph.invoke(AgentState)"| Guard
+    User <-->|"Natural Language Query / Clarification"| ChatUI
+    ChatUI <-->|"HTTP JSON (/query)"| FastAPI
+    FastAPI <-->|"StateGraph.invoke(AgentState)"| Text2SQL
 
-    %% Agent State Flow
-    Guard -->|"Ambiguous Query (Needs Clarification)"| Explainer
-    Guard -->|"Intent Verified"| Context
-    Context --> Text2SQL
-    Text2SQL --> Execution
-    Execution -->|"Runtime Error / Typo"| Recovery
-    Recovery -->|"Repaired SQL"| Execution
-    Execution -->|"Execution Success"| Aggregator
-    Aggregator --> Explainer
-    Explainer -->|"Final Grounded Response"| FastAPI
-
-    %% MCP Tool Invocations
-    Context -.->|"describe_table / get_sample_rows"| MCPClient
-    Execution -.->|"execute_read_query"| MCPClient
+    %% Agent to MCP Tool Invocations
+    Text2SQL -.->|"describe_table / get_sample_rows"| MCPClient
+    Text2SQL -.->|"execute_read_query"| MCPClient
     MCPClient <-->|"MCP Tool Protocol (JSON-RPC)"| MCPServer
     MCPServer --> Router
 
@@ -84,10 +66,9 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **1. Presentation** | Modern Chat UI | HTML5, CSS3, Vanilla JS | Minimal ChatGPT-style interface with a single auto-centering bottom composer, response streaming, collapsible SQL preview, and clean tabular rendering. |
 | **2. API Gateway** | REST API & Sessions | FastAPI, Uvicorn, Pydantic | Exposes `/query` and `/health`, manages conversation session memory (`thread_id`), and bridges HTTP clients to the agent graph. |
-| **3. Agent Core** | LangGraph StateGraph | LangGraph, Python 3.11 | Coordinates the linear agentic workflow: disambiguation guard, dynamic schema context building, dialect-specific SQL generation, execution, error self-correction, cross-source in-memory joins, and grounded answer synthesis. |
-| **4. MCP Layer** | Custom MCP Server & Client | Model Context Protocol SDK, SQLGlot | Abstracts database drivers behind 6 standardized tools. Enforces AST read-only AST safety validation (`validate_read_only_sql`), row limits (`apply_query_limit`), and query execution timeouts. |
+| **3. Agent Core** | LangGraph StateGraph | LangGraph, Python 3.11 | Focused Text-to-SQL Node responsible for understanding user queries, checking for ambiguity, and generating dialect-aware SQL across target data sources. |
+| **4. MCP Layer** | Custom MCP Server & Client | Model Context Protocol SDK, SQLGlot | Abstracts database drivers behind 6 standardized tools. Enforces AST read-only safety validation (`validate_read_only_sql`), row limits (`apply_query_limit`), and query execution timeouts. |
 | **5. Storage Layer** | Heterogeneous Databases | PostgreSQL 16, MS SQL Server, DuckDB | Stores business data across distributed domains: operational sales in PostgreSQL, customer support in SQL Server, and catalog/inventory in analytical CSV files. |
-
 
 ---
 
@@ -106,11 +87,11 @@ flowchart TD
 
 ## 4. Main Workflow
 
-1. **Intent & Clarification Guard:** Checks if the user query or entity reference is ambiguous (e.g., `"Show sales"` or `"What's the price of the database agent?"`) and asks a clarifying question before proceeding. For clear queries, extracts the structured intent (`operation`, `filters`, `attributes`, and target sources).
-2. **Schema Discovery (Context Builder):** Performs targeted schema discovery through MCP tools (`describe_table`, `get_relationships`, `get_sample_rows`) for the identified data sources and tables.
-3. **Dialect-Aware Text-to-SQL:** Generates native SQL for PostgreSQL (`LIMIT`), SQL Server (`SELECT TOP`), and DuckDB directly matching the verified intent.
-4. **Execution & Self-Correction:** Executes queries via the MCP Client, chains dynamic entity keys across sources, and automatically repairs SQL if runtime errors occur.
-5. **Cross-Source Aggregation & Explanation:** Merges multi-source records in memory and generates a clear, grounded natural-language response.
+1. **User Query Input:** The user submits a natural-language question or follow-up in the chat UI.
+2. **Text-to-SQL Generation (Agent):** The Text-to-SQL node analyzes the query, checks for ambiguity, and generates dialect-aware read-only SQL matching the target data sources (PostgreSQL, SQL Server, DuckDB).
+3. **MCP Query Execution:** The generated SQL queries are executed via the MCP Client through the custom MCP Server with AST safety guardrails and row caps.
+4. **Data Aggregation & Grounded Answer:** Returned records are merged across sources, formatted into clean tabular data, and presented to the user with a collapsible "View generated SQL" preview.
+
 
 
 ---
